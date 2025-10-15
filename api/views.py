@@ -20,7 +20,8 @@ def analyze_dataframe(df):
         
         # Try to infer if the series is numeric
         # Attempt to convert to numeric, coercing errors to NaN
-        df[col] = pd.to_numeric(df[col], errors='coerce')
+        # Use .loc to avoid chained-assignment warnings in future pandas versions
+        df.loc[:, col] = pd.to_numeric(df[col], errors='coerce')
         
         # Now check if it's numeric after coercion
         if pd.api.types.is_numeric_dtype(df[col]):
@@ -43,11 +44,14 @@ def analyze_dataframe(df):
                     stats[col][key] = None
         else:
             # Basic info for non-numeric/object columns
+            # Safely compute top_value (mode) — mode() may return an empty Series
+            mode_series = series.mode()
+            top_val = mode_series.iloc[0] if not mode_series.empty else None
             stats[col] = {
                 "dtype": str(series.dtype),
                 "count": int(series.count()),
                 "unique": int(series.nunique()),
-                "top_value": series.mode().iloc[0] if not series.empty else None,
+                "top_value": top_val,
                 "mean": None, "median": None, "std": None, "min": None, "max": None # Explicitly set for table consistency
             }
     
@@ -63,7 +67,13 @@ def analyze_dataframe(df):
         except Exception:
             pass
         return v
-    sample_chart = sample_df.applymap(_to_python_scalar).to_dict(orient='records')
+
+    # applymap is deprecated; convert to records and sanitize each value explicitly
+    raw_records = sample_df.to_dict(orient='records')
+    sample_chart = []
+    for rec in raw_records:
+        clean = {k: _to_python_scalar(v) for k, v in rec.items()}
+        sample_chart.append(clean)
     
     # Simple AI Summary Placeholder
     summary = f"The dataset contains {len(df.columns)} columns and {len(df)} rows. Key statistics for numeric data have been calculated. The data quality appears suitable for further analysis."

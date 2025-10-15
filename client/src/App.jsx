@@ -3,12 +3,14 @@ import './App.css';
 
 
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
+import { parseCSV } from './utils/csv';
 import logo from './d2m_logo.png';
 import Toast from './Toast';
 import ChurnChart from './ChurnChart';
-import { computeMonthlySeries as computeMonthlySeriesUtil, holtLinearForecast, holtAutoTune, holtAutoTuneAdvanced } from './utils/analytics';
+import { computeMonthlySeries as computeMonthlySeriesUtil, holtAutoTune, holtAutoTuneAdvanced } from './utils/analytics';
 import { generateScenarioSummary } from './utils/summarizer';
 import { LineChart, Line, Area, XAxis, YAxis, CartesianGrid, Tooltip as ReTooltip, ResponsiveContainer, Brush, Legend } from 'recharts';
+import { computeForecastFromRecords } from './utils/forecast';
 
 // --- Utility Functions (Core Logic) ---
 
@@ -141,41 +143,7 @@ const DataDashboard = ({ onDataUpload, showCustomModal, seedInitialData, showToa
 
   // expected headers kept for reference if needed later
 
-  const parseCSV = (csvText, userMapping = {}) => {
-    const lines = csvText.trim().split('\n');
-    if (lines.length <= 1) return [];
-    const headerLine = lines[0].split(',').map(h => h.trim());
-    // Build rows as objects using raw headers
-    const rows = lines.slice(1).map((line, idx) => {
-      const cols = line.split(',');
-      const obj = { uploadedAt: new Date().toISOString(), isContacted: false };
-      headerLine.forEach((h, j) => { obj[h] = cols[j] ? cols[j].trim() : ''; });
-      // ensure an id field
-      obj.id = obj.id || obj.name || `${idx + 1}_${Date.now()}`;
-      return obj;
-    }).filter(r => Object.keys(r).length > 0);
-
-    // If user provided mapping, normalize keys
-    const dateKey = userMapping.dateKey || mapping.dateKey || headerLine.find(h => /date|month|created_at|uploadedat/i.test(h)) || null;
-    const mrrKey = userMapping.mrrKey || mapping.mrrKey || headerLine.find(h => /mrr|revenue|amount|value/i.test(h)) || null;
-    const idKey = userMapping.idKey || mapping.idKey || headerLine.find(h => /id|name|customer/i.test(h)) || 'id';
-
-    const normalized = rows.map((r, i) => {
-      const out = { isContacted: r.isContacted || false, uploadedAt: r.uploadedAt };
-      out.id = r[idKey] || r.id || (`${i}_${Date.now()}`);
-      out.name = r.name || r[out.id] || out.id;
-      out.MRR = mrrKey && r[mrrKey] ? parseFloat(String(r[mrrKey]).replace(/[^0-9.-]+/g, '')) || 0 : 0;
-      if (dateKey && r[dateKey]) out.date = r[dateKey];
-      // preserve churnProbability if present
-      out.churnProbability = r.churnProbability !== undefined ? parseFloat(r.churnProbability) || 0 : (r.churn || 0);
-      out.supportTickets = r.supportTickets ? parseFloat(r.supportTickets) || 0 : 0;
-      out.lastActivityDays = r.lastActivityDays ? parseFloat(r.lastActivityDays) || 0 : 0;
-      out.contractLengthMonths = r.contractLengthMonths ? parseFloat(r.contractLengthMonths) || 12 : 12;
-      return out;
-    });
-
-    return normalized.filter(c => c.MRR !== undefined && c.MRR !== null);
-  };
+  // parseCSV moved to ./utils/csv.js
 
 
   const handleFileUpload = (e) => {
@@ -366,7 +334,7 @@ const DataOverview = ({ overviewData }) => {
 };
 
 // Component 3: Time-Series Forecast (Recharts-based)
-const TimeSeriesForecast = ({ chartRef, monthlySeries = [], showCustomModal = () => {}, showToast = null }) => {
+const TimeSeriesForecast = ({ chartRef, monthlySeries = [], records = [], showCustomModal = () => {}, showToast = null }) => {
   const [monthsOut, setMonthsOut] = useState(12);
   const [method, setMethod] = useState('linear'); // 'linear' or 'holt'
   // Holt smoothing parameters (persisted in localStorage)
@@ -441,83 +409,39 @@ const TimeSeriesForecast = ({ chartRef, monthlySeries = [], showCustomModal = ()
   // const bootstrapWorkerRef = useRef(null); // reserved for cancellation if needed
   // Linear regression on index -> value (sync + async bootstrap support)
 
-  const computeSyncForecast = useCallback(() => {
-    // If no series data, nothing to forecast
-    if (!series || series.length === 0) return null;
-    // If method is Holt and not requesting async bootstrap, compute synchronously via helper
-    if (method === 'holt') {
-      if (!holtBootstrap || !holtBootstrapAsync) {
-        return holtLinearForecast(series, monthsOut, { alpha: holtAlpha, beta: holtBeta, bootstrap: holtBootstrap, bootstrapSamples: holtBootstrapSamples });
-      }
-      // otherwise fall through to linear sync (we'll run async below)
-    }
-
-    // Linear regression
-    const n = series.length;
-    const xs = series.map((_, i) => i);
-    const ys = series.map(s => s.total);
-    const xMean = xs.reduce((a,b) => a+b,0)/n;
-    const yMean = ys.reduce((a,b) => a+b,0)/n;
-    let num = 0, den = 0;
-    for (let i=0;i<n;i++){ num += (xs[i]-xMean)*(ys[i]-yMean); den += (xs[i]-xMean)*(xs[i]-xMean); }
-    const slope = den === 0 ? 0 : num/den;
-    const intercept = yMean - slope * xMean;
-
-    // residual std dev
-    let rss = 0;
-    for (let i=0;i<n;i++){ const pred = intercept + slope*xs[i]; rss += Math.pow(ys[i]-pred,2); }
-    const residualStd = n > 1 ? Math.sqrt(rss / (n-1)) : 0;
-
-    // forecast points
-    const forecast = [];
-    for (let k=1;k<=monthsOut;k++){
-      const idx = n - 1 + k; // continue index
-      const pred = intercept + slope * idx;
-      const lower = pred - 1.96 * residualStd;
-      const upper = pred + 1.96 * residualStd;
-      // compute period label: take last period and add k months
-      const last = series[series.length - 1].period; // YYYY-MM
-      const [yy,mm] = last.split('-').map(Number);
-      const dt = new Date(yy, mm - 1 + k, 1);
-      const period = `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}`;
-      forecast.push({ period, predicted: Math.max(0, pred), lower: Math.max(0, lower), upper: Math.max(0, upper) });
-    }
-
-    return { slope, intercept, residualStd, forecast };
-  }, [series, monthsOut, method, holtAlpha, holtBeta, holtBootstrap, holtBootstrapSamples, holtBootstrapAsync]);
-
   useEffect(() => {
     let cancelled = false;
-    // compute sync result first
-    const sync = computeSyncForecast();
-    setForecastResultState(sync);
-
-    // if holt + async bootstrap requested, trigger async compute and update when ready
-    if (method === 'holt' && holtBootstrap && holtBootstrapAsync && series && series.length > 2) {
-      setComputingBootstrap(true);
-      // holtLinearForecast will return a Promise when bootstrapAsync is true
-      const maybePromise = holtLinearForecast(series, monthsOut, { alpha: holtAlpha, beta: holtBeta, bootstrap: true, bootstrapSamples: holtBootstrapSamples, bootstrapAsync: true });
-      if (maybePromise && typeof maybePromise.then === 'function') {
-        // store promise so caller can revoke if needed
-        asyncForecastRef.current = maybePromise;
-        maybePromise.then((res) => {
+    setComputingBootstrap(true);
+    // Use computeForecastFromRecords helper — it will aggregate monthly series and run forecast
+    try {
+      const maybe = computeForecastFromRecords(records && records.length ? records : (monthlySeries && monthlySeries.length ? monthlySeries.map(ms => ({ period: ms.period, total: ms.total })) : []), { method: method === 'holt' ? 'holt' : 'linear', monthsOut, holtOptions: { alpha: holtAlpha, beta: holtBeta, bootstrap: holtBootstrap, bootstrapSamples: holtBootstrapSamples, bootstrapAsync: holtBootstrapAsync } });
+      // The helper may return a Promise (if holt with async bootstrap), or an object
+      if (maybe && typeof maybe.then === 'function') {
+        asyncForecastRef.current = maybe;
+        maybe.then((res) => {
           asyncForecastRef.current = null;
           if (cancelled) return;
-          setForecastResultState(res);
+          // res is the full object { monthlySeries, forecastResult }
+          setForecastResultState(res.forecastResult || res);
         }).catch((err) => {
           asyncForecastRef.current = null;
-          console.error('Async bootstrap failed', err);
-          (showToast || showCustomModal)('Async bootstrap failed. See console for details.', 'error');
+          console.error('Async forecast failed', err);
+          (showToast || showCustomModal)('Async forecast failed. See console for details.', 'error');
         }).finally(() => { if (!cancelled) setComputingBootstrap(false); });
       } else {
-        // not a promise: set immediately
-        setForecastResultState(maybePromise);
+        // synchronous result
+        const res = maybe || {};
+        setForecastResultState(res.forecastResult || res);
         setComputingBootstrap(false);
       }
+    } catch (err) {
+      console.error('Forecast compute failed', err);
+      (showToast || showCustomModal)('Forecast compute failed. See console for details.', 'error');
+      setComputingBootstrap(false);
     }
 
     return () => { cancelled = true; };
-  }, [computeSyncForecast, method, holtBootstrap, holtBootstrapAsync, holtBootstrapSamples, holtAlpha, holtBeta, monthsOut, series, showToast, showCustomModal]);
+  }, [records, monthlySeries, method, monthsOut, holtAlpha, holtBeta, holtBootstrap, holtBootstrapSamples, holtBootstrapAsync, showToast, showCustomModal]);
 
   // Render the forecast chart UI
   return (
@@ -595,7 +519,7 @@ const TimeSeriesForecast = ({ chartRef, monthlySeries = [], showCustomModal = ()
               </div>
             )}
             <button type="button" aria-label="Download forecast CSV" className="px-3 py-1 bg-green-500 text-white rounded text-sm" onClick={downloadCSV}>Download CSV</button>
-            <button type="button" aria-label="Download forecast image" disabled={exporting} className="px-3 py-1 bg-blue-500 text-white rounded text-sm" onClick={async () => {
+            <button type="button" aria-label="Download forecast image" disabled={exporting || !(chartRef && chartRef.current)} aria-disabled={exporting || !(chartRef && chartRef.current)} className="px-3 py-1 bg-blue-500 text-white rounded text-sm" onClick={async () => {
               const container = chartRef && chartRef.current ? chartRef.current : null;
               if (!container) { (showToast || showCustomModal)('No chart available to export.', 'error'); return; }
               setExporting(true);
@@ -604,7 +528,7 @@ const TimeSeriesForecast = ({ chartRef, monthlySeries = [], showCustomModal = ()
                 if (ok) (showToast || showCustomModal)('Chart image downloaded.', 'success'); else (showToast || showCustomModal)('Failed to export chart image.', 'error');
               } finally { setExporting(false); }
             }}>{exporting ? 'Exporting...' : 'Download Image'}</button>
-            <button type="button" aria-label="Copy forecast image to clipboard" disabled={exporting} className="px-3 py-1 bg-gray-500 text-white rounded text-sm" onClick={async () => {
+            <button type="button" aria-label="Copy forecast image to clipboard" disabled={exporting || !(chartRef && chartRef.current)} aria-disabled={exporting || !(chartRef && chartRef.current)} className="px-3 py-1 bg-gray-500 text-white rounded text-sm" onClick={async () => {
               const container = chartRef && chartRef.current ? chartRef.current : null;
               if (!container) { (showToast || showCustomModal)('No chart available to copy.', 'error'); return; }
               setExporting(true);
