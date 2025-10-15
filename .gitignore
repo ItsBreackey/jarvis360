@@ -124,3 +124,6 @@ temp/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# local backups
+backups/
