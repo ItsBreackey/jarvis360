@@ -538,14 +538,18 @@ const TimeSeriesForecast = ({ chartRef, monthlySeries = [], records = [], showCu
               } finally { setExporting(false); }
             }}>{exporting ? 'Exporting...' : 'Copy Image'}</button>
             {computingBootstrap && (
-              <button type="button" aria-label="Cancel CI" className="px-3 py-1 bg-red-500 text-white rounded text-sm" onClick={() => {
-                try {
-                  if (asyncForecastRef.current && typeof asyncForecastRef.current.revoke === 'function') asyncForecastRef.current.revoke();
-                } catch (e) { console.error('Cancel revoke failed', e); }
-                asyncForecastRef.current = null;
-                setComputingBootstrap(false);
-                (showToast || showCustomModal)('Bootstrap CI cancelled.', 'info');
-              }}>Cancel CI</button>
+              <div className="flex items-center space-x-2">
+                <div className="text-sm text-gray-500">Computing CI...</div>
+                <button type="button" aria-label="Cancel CI" className="px-3 py-1 bg-red-500 text-white rounded text-sm" onClick={() => {
+                  try {
+                    if (asyncForecastRef.current && typeof asyncForecastRef.current.revoke === 'function') asyncForecastRef.current.revoke();
+                  } catch (e) { console.error('Cancel revoke failed', e); }
+                  asyncForecastRef.current = null;
+                  setComputingBootstrap(false);
+                  setForecastResultState(prev => prev); // keep last known forecast displayed
+                  (showToast || showCustomModal)('Bootstrap CI cancelled.', 'info');
+                }}>Cancel CI</button>
+              </div>
             )}
           </div>
         </div>
