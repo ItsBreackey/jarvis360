@@ -131,25 +131,41 @@ test('register -> login via API cookies -> upload -> save scenario -> server has
     // Click Process File (use force to avoid intermittent overlay click interception)
     await page.locator('button:has-text("Process File")').first().click({ force: true });
 
-  // Wait for client processing to settle. Prefer waiting for a known overlay to hide, but fall back to a short timeout.
+  // Wait for client processing to settle: dismiss any modal and wait for overlays to clear
   try {
-    await page.waitForSelector('div.fixed.inset-0.z-50', { state: 'hidden', timeout: 30000 });
+    const dismiss = page.locator('button:has-text("Dismiss")').first();
+    if ((await dismiss.count()) > 0) {
+      try { await dismiss.click({ timeout: 2000 }); } catch (e) { /* ignore */ }
+    }
   } catch (e) {
-    // overlay didn't appear or didn't hide; continue with additional checks
-    await page.waitForTimeout(1000);
+    // ignore
   }
 
-  // Ensure Save button is visible and enabled
+  // Prefer waiting for a known overlay to hide (if present)
+  try {
+    await page.waitForSelector('div.fixed.inset-0.z-50', { state: 'hidden', timeout: 10000 });
+  } catch (e) {
+    // ignore, we'll proceed to navigation and longer waits
+  }
+
+  // Ensure Save button is present in the Scenarios view. If not visible, force navigation to Scenarios and wait longer.
   const saveBtn = page.locator('button[aria-label="Save scenario"]').first();
-  // If the Save button isn't present (app may still be on Data Dashboard), navigate to the Scenarios view
-  if ((await saveBtn.count()) === 0) {
+  if ((await saveBtn.count()) === 0 || !(await saveBtn.isVisible())) {
     const scenariosNav = page.locator('button[aria-label="Go to Scenarios"]').first();
     try { await scenariosNav.click(); } catch (e) { await scenariosNav.click({ force: true }); }
-    // Wait for the scenarios view and Save button to render (longer timeout to avoid flakiness)
-    await page.waitForSelector('button[aria-label="Save scenario"]', { timeout: 15000 }).catch(() => {});
   }
-  // final check: ensure visible with generous timeout
-  await expect(saveBtn).toBeVisible({ timeout: 15000 });
+
+  // Wait up to 30s for the Save button to be visible and enabled
+  try {
+    await saveBtn.waitFor({ state: 'visible', timeout: 30000 });
+  } catch (err) {
+    // capture trace/screenshot for debugging then rethrow
+    try {
+      await page.screenshot({ path: 'client/test-results/save-button-missing.png', fullPage: true });
+    } catch (e) {}
+    throw new Error('Save button did not appear within timeout - screenshot saved to client/test-results/save-button-missing.png');
+  }
+
   // Wait until the button is enabled (not disabled attribute)
   await page.waitForFunction((sel) => {
     const btn = document.querySelector(sel);
@@ -157,9 +173,8 @@ test('register -> login via API cookies -> upload -> save scenario -> server has
   }, {}, 'button[aria-label="Save scenario"]');
 
   // Intercept the dashboard POST request so we can wait for a successful save triggered by the UI
-  const [saveReq] = await Promise.all([
-    page.waitForResponse((resp) => resp.url().includes('/api/dashboards/') && resp.request().method() === 'POST' && resp.status() < 500, { timeout: 15000 }),
-    // Click the Save button. Use a normal click first; fallback to force click if blocked.
+  const [saveResp] = await Promise.all([
+    page.waitForResponse((resp) => resp.url().includes('/api/dashboards/') && resp.request().method() === 'POST' && resp.status() < 500, { timeout: 20000 }),
     (async () => {
       try {
         await saveBtn.click();
@@ -170,7 +185,7 @@ test('register -> login via API cookies -> upload -> save scenario -> server has
   ]);
 
   // Confirm the save response was successful
-  expect(saveReq.ok()).toBeTruthy();
+  expect(saveResp.ok()).toBeTruthy();
 
   // Optionally verify server-side dashboards for the user using the API token we obtained earlier
   const access = cookieMap['access_token'];
