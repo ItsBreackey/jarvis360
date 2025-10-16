@@ -25,7 +25,15 @@ export function parseCSV(csvText, mapping = {}) {
     out.id = (r[idKey] || r.id || r.name || `${i}_${Date.now()}`);
     out.name = r.name || out.id;
     out.MRR = mrrKey && r[mrrKey] ? parseFloat(String(r[mrrKey]).replace(/[^0-9.-]+/g, '')) || 0 : 0;
-    if (dateKey && r[dateKey]) out.date = r[dateKey];
+    if (dateKey && r[dateKey]) {
+      // normalize common date formats to YYYY-MM-DD when possible
+      const d = new Date(r[dateKey]);
+      if (!isNaN(d.getTime())) {
+        out.date = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+      } else {
+        out.date = r[dateKey];
+      }
+    }
     out.churnProbability = (r.churnProbability !== undefined && r.churnProbability !== '') ? parseFloat(r.churnProbability) || 0 : (r.churn || 0);
     out.supportTickets = r.supportTickets ? parseFloat(r.supportTickets) || 0 : 0;
     out.lastActivityDays = r.lastActivityDays ? parseFloat(r.lastActivityDays) || 0 : 0;

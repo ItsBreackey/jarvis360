@@ -17,6 +17,14 @@ export function computeForecastFromRecords(records, options = {}) {
   if (method === 'holt') {
     const holtOptions = options.holtOptions || {};
     const res = holtLinearForecast(monthlySeries, monthsOut, holtOptions);
+    // If holtLinearForecast returns a Promise (async bootstrap), wrap it so callers
+    // receive a Promise that resolves to the full object { monthlySeries, forecastResult }
+    if (res && typeof res.then === 'function') {
+      const wrapper = res.then((forecastResult) => ({ monthlySeries, forecastResult }));
+      // attach revoke if available on inner promise/worker
+      try { if (typeof res.revoke === 'function') wrapper.revoke = () => res.revoke(); } catch (e) { /* ignore */ }
+      return wrapper;
+    }
     return { monthlySeries, forecastResult: res };
   }
 

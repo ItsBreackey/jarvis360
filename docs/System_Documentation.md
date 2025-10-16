@@ -1,3 +1,96 @@
+# Jarvis360 — System Documentation (Snapshot)
+
+Last updated: 2025-10-16
+
+This document summarizes the current state of the Jarvis360 project (backend, frontend), developer runbook, test instructions, and recent changes made to improve CSV intake, forecasting, async bootstrap, tests and CI.
+
+## High-level architecture
+
+- Backend: Django 5.2 application with Django REST Framework endpoints under `api/`.
+- Frontend: React (Create React App) contained in `client/` with Recharts for charts and html2canvas for exports.
+- Forecasting & analytics: in-browser utilities under `client/src/utils` (`analytics.js`, `forecast.js`) performing aggregation, linear and Holt forecasts and optional bootstrap CI.
+
+## Recent changes (summary)
+
+- Replaced the naive CSV parser with PapaParse (`client/src/utils/csv.js`) to correctly handle quoted fields and commas inside fields. Dates are normalized to `YYYY-MM-DD` where possible.
+- Centralized forecast helper `client/src/utils/forecast.js` ensures consistent return shape. Holt forecast supports optional bootstrap confidence intervals and an async path with a cancellable worker-style promise.
+- Frontend improvements to UX for async bootstrap: clearer status indicator and an explicit Cancel CI button which revokes the in-flight async promise and preserves the last visible forecast.
+- Unit tests added/updated: CSV parse tests (including quoted field cases), forecast async path tests, and existing analytics tests all run under `client/` Jest harness.
+- CI workflow added: `.github/workflows/ci.yml` runs backend Django tests and frontend tests on push/PR.
+
+## CSV input expectations
+
+- The client expects a CSV with a date-like column and an MRR/amount column. Common header names are detected automatically, or users can map headers in the UI.
+- Supported: quoted fields, embedded commas, escaped quotes. Dates will be normalized to `YYYY-MM-DD` if parsable by the JS Date constructor.
+- For robust, production usage consider using consistent ISO dates in the CSV to avoid locale parsing ambiguity.
+
+## Forecasting behavior
+
+- `client/src/utils/analytics.js` provides:
+  - `computeMonthlySeries(records)` — aggregates records into monthly totals and computes new/expansion/churn heuristics.
+  - `linearForecast(series, monthsOut)` — OLS regression on time index with approximate 95% CI.
+  - `holtLinearForecast(series, monthsOut, options)` — Holt's linear double-exponential smoothing with optional auto-tune, bootstrap CI, and an async bootstrap path that supports cancellation.
+
+- `client/src/utils/forecast.js` provides `computeForecastFromRecords(records, options)` which normalizes inputs, runs the selected method and always returns a predictable structure. If bootstrapAsync is requested it returns a Promise which has an attached `revoke()` method (when possible) so callers can cancel long-running CI computations.
+
+## Async bootstrap & cancellation
+
+- When the user enables Holt bootstrap with `bootstrapAsync`, a worker-like async computation is used. The promise returned by the helper can include a `revoke()` method which terminates the underlying worker or abandons the computation when run in non-browser environments.
+- The UI exposes a Cancel CI button which calls `revoke()` and stops the computing indicator while keeping the last known forecast visuals.
+
+## How to run tests locally (developer runbook)
+
+1. Backend (Django):
+
+   - Create and activate a virtual environment (Windows PowerShell):
+     ```powershell
+     python -m venv venv
+     .\venv\Scripts\Activate
+     pip install -r requirements.txt
+     ```
+
+   - Run Django tests:
+     ```powershell
+     python manage.py test
+     ```
+
+   Notes: The `requirements.txt` pins `numpy` and `pandas` versions; if pip fails to install a pinned `numpy` wheel for your Python version, either use a Python version compatible with the pinned wheel or update the pinned numpy in `requirements.txt`.
+
+2. Frontend (client):
+
+   - Install and run tests from the project root:
+     ```powershell
+     npm --prefix .\client install
+     npm --prefix .\client test -- --watchAll=false
+     ```
+
+   - Start dev server:
+     ```powershell
+     npm --prefix .\client start
+     ```
+
+3. CI (GitHub Actions):
+
+   - Commits to `master` and Pull Requests trigger the workflow defined at `.github/workflows/ci.yml`. The workflow runs backend Django tests (Python 3.11) and frontend tests (Node 18).
+
+## System / environment caveats
+
+- numpy wheel availability: some pinned numpy versions may not have wheels for your Python minor version. If pip fails for a pinned numpy, either install a compatible Python interpreter or loosen the pin in `requirements.txt`.
+- Plotly is optional — if not installed interactive plots in the admin may not render, but tests should still run.
+
+## Developer notes & next steps
+
+- Consider adding end-to-end tests for the file upload + forecasting pipeline (Cypress or Playwright) to validate the entire UX across browsers.
+- Replace the in-repo worker script with a formal Web Worker build step to improve reliability when performing heavy bootstrap sampling in browsers.
+- Consider adding a graceful fallback UI for very large CSV uploads (progress indicator, chunked parse with PapaParse).
+
+## Changelog (short)
+
+- 2025-10-16: Replaced CSV parser (PapaParse), added async forecast tests, improved async bootstrap UX, added GitHub Actions CI, added this documentation.
+
+----
+
+If you want this `docs/System_Documentation.md` exported into the existing `docs/System_Documentation.docx`, tell me and I will (a) convert to a simple .docx using a Python script, or (b) paste its contents into the `.docx` if you prefer manual editing in Word.
 Jarvis360 — System Documentation
 
 Version: 1.0
