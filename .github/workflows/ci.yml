@@ -37,3 +37,27 @@ jobs:
       - name: Run frontend tests
         working-directory: ./client
         run: npm test -- --watchAll=false
+
+  docx-check:
+    runs-on: ubuntu-latest
+    needs: [backend-tests, frontend-tests]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - name: Install converter deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install python-docx markdown pypandoc
+      - name: Generate docx from md
+        run: |
+          python scripts/md_to_docx.py docs/System_Documentation.md
+      - name: Check for differences
+        run: |
+          if ! git diff --exit-code -- docs/System_Documentation.docx; then
+            echo 'The generated docs/System_Documentation.docx differs from the checked-in file. Please regenerate and update the committed docx.'
+            git --no-pager --no-color diff -- docs/System_Documentation.docx || true
+            exit 1
+          fi
