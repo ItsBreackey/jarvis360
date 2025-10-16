@@ -5,6 +5,13 @@ import logging
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView
+from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.authentication import TokenAuthentication
+from .serializers import UploadedCSVSerializer, DashboardSerializer
+from .models import UploadedCSV, Dashboard, Organization
+from django.shortcuts import get_object_or_404
 
 logger = logging.getLogger(__name__)
 
@@ -165,3 +172,47 @@ class SimulationAPIView(APIView):
         except Exception as e:
             logger.error(f"Error processing Simulation Summary: {e}", exc_info=True)
             return Response({"error": f"Error processing file for simulation: {str(e)}. Ensure a valid CSV with a numeric column is uploaded."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class UploadCSVAPIView(ListCreateAPIView):
+    """List and upload CSVs for the user's organization."""
+    serializer_class = UploadedCSVSerializer
+    permission_classes = [IsAuthenticated]
+    authentication_classes = [TokenAuthentication]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def get_queryset(self):
+        # Simple org scoping: assume user has `profile.org` or use first org
+        # For MVP, we will allow listing all uploads (can tighten later)
+        return UploadedCSV.objects.filter(uploaded_by=self.request.user).order_by('-created_at')
+
+    def perform_create(self, serializer):
+        org = None
+        # For now try to get first org for the user; extend later with real org membership
+        org = Organization.objects.first()
+        serializer.save(uploaded_by=self.request.user, org=org, filename=getattr(self.request.FILES.get('file'), 'name', 'upload.csv'))
+
+
+class DashboardListCreateAPIView(ListCreateAPIView):
+    serializer_class = DashboardSerializer
+    permission_classes = [IsAuthenticated]
+    authentication_classes = [TokenAuthentication]
+
+    def get_queryset(self):
+        org = Organization.objects.first()
+        return Dashboard.objects.filter(org=org).order_by('-updated_at')
+
+    def perform_create(self, serializer):
+        org = Organization.objects.first()
+        serializer.save(created_by=self.request.user, org=org)
+
+
+class DashboardDetailAPIView(RetrieveUpdateDestroyAPIView):
+    serializer_class = DashboardSerializer
+    permission_classes = [IsAuthenticated]
+    authentication_classes = [TokenAuthentication]
+
+    def get_queryset(self):
+        org = Organization.objects.first()
+        return Dashboard.objects.filter(org=org)
+
