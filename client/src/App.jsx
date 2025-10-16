@@ -139,7 +139,23 @@ const DataDashboard = ({ onDataUpload, showCustomModal, seedInitialData, showToa
   const [loading, setLoading] = useState(false);
   const [uploadedCount, setUploadedCount] = useState(0);
   const [previewHeaders, setPreviewHeaders] = useState([]);
-  const [mapping, setMapping] = useState({ dateKey: null, mrrKey: 'MRR', idKey: 'id' });
+  const [previewRows, setPreviewRows] = useState([]);
+  const [showMalformed, setShowMalformed] = useState(false);
+  // Persisted header mapping (loads from localStorage if present)
+  const HEADER_MAPPING_KEY = 'jarvis_header_mapping_v1';
+  const defaultMapping = { dateKey: null, mrrKey: 'MRR', idKey: 'id', churnKey: null, supportKey: null, lastActivityKey: null };
+  const [mapping, setMapping] = useState(() => {
+    try {
+      const raw = localStorage.getItem(HEADER_MAPPING_KEY);
+      if (raw) return { ...defaultMapping, ...JSON.parse(raw) };
+    } catch (e) { /* ignore */ }
+    return defaultMapping;
+  });
+
+  // save mapping to localStorage when it changes
+  useEffect(() => {
+    try { localStorage.setItem(HEADER_MAPPING_KEY, JSON.stringify(mapping)); } catch (e) { /* ignore */ }
+  }, [mapping]);
 
   // expected headers kept for reference if needed later
 
@@ -158,6 +174,17 @@ const DataDashboard = ({ onDataUpload, showCustomModal, seedInitialData, showToa
         const firstLine = text.split('\n')[0] || '';
         const headers = firstLine.split(',').map(h => h.trim());
         setPreviewHeaders(headers);
+        // parse preview rows (first 10) quickly
+        try {
+          const lines = text.split('\n').slice(1, 11);
+          const previews = lines.map(l => {
+            const cols = l.split(',');
+            const obj = {};
+            headers.forEach((h, idx) => { obj[h] = cols[idx] !== undefined ? cols[idx].trim() : ''; });
+            return obj;
+          }).filter(r => Object.keys(r).length > 0);
+          setPreviewRows(previews);
+        } catch (e) { setPreviewRows([]); }
         // set sensible defaults
         setMapping({ dateKey: headers.find(h => /date|month|created_at|uploadedat/i.test(h)) || null, mrrKey: headers.find(h => /mrr|revenue|amount|value/i.test(h)) || 'MRR', idKey: headers.find(h => /id|name|customer/i.test(h)) || 'id' });
       };
@@ -168,12 +195,25 @@ const DataDashboard = ({ onDataUpload, showCustomModal, seedInitialData, showToa
     }
   };
 
+  // Detect malformed uploads (missing date or MRR-like columns)
+  useEffect(() => {
+    try {
+      // only evaluate after we have detected headers (i.e., after a file preview)
+      if (!previewHeaders || previewHeaders.length === 0) {
+        setShowMalformed(false);
+        return;
+      }
+      const dateCandidate = mapping.dateKey || previewHeaders.find(h => /date|month|created_at|uploadedat|start_date|signupDate/i.test(h));
+      const mrrCandidate = mapping.mrrKey || previewHeaders.find(h => /mrr|revenue|amount|value/i.test(h));
+      setShowMalformed(!(dateCandidate && mrrCandidate));
+    } catch (e) { setShowMalformed(false); }
+  }, [previewHeaders, mapping]);
+
   const handleProcessFile = async () => {
     if (!file) {
       (showToast || showCustomModal)("No valid file selected.", 'error');
       return;
     }
-    setLoading(true);
     setUploadedCount(0);
     const reader = new FileReader();
 
@@ -198,6 +238,7 @@ const DataDashboard = ({ onDataUpload, showCustomModal, seedInitialData, showToa
       } finally {
         setLoading(false);
         setFile(null);
+        setPreviewRows([]);
       }
     };
 
@@ -232,9 +273,21 @@ const DataDashboard = ({ onDataUpload, showCustomModal, seedInitialData, showToa
 
         <div className="mb-6 p-4 bg-blue-50 rounded-lg border border-blue-200">
           <h4 className="font-semibold text-blue-800 mb-2">Required CSV Format (Headers):</h4>
-          <code className="block bg-blue-100 p-2 rounded text-sm text-blue-900 overflow-x-auto">
-            name,MRR,churnProbability,supportTickets,lastActivityDays,contractLengthMonths
-          </code>
+          <p className="text-sm text-blue-800 mb-2">At minimum include a Date column and an MRR (revenue) column. Common header names:</p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <div>
+              <div className="text-xs text-blue-700 font-semibold">Date aliases</div>
+              <code className="block bg-blue-100 p-2 rounded text-sm text-blue-900 overflow-x-auto">date, month, created_at, createdAt, uploadedAt, start_date, signupDate</code>
+            </div>
+            <div>
+              <div className="text-xs text-blue-700 font-semibold">MRR / Revenue aliases</div>
+              <code className="block bg-blue-100 p-2 rounded text-sm text-blue-900 overflow-x-auto">MRR, revenue, amount, value, price, monthly_revenue</code>
+            </div>
+          </div>
+          <div className="mt-3 text-sm text-blue-700">Other helpful columns: <code className="bg-blue-100 p-1 rounded">name</code>, <code className="bg-blue-100 p-1 rounded">churnProbability</code>, <code className="bg-blue-100 p-1 rounded">supportTickets</code></div>
+          <div className="mt-2 text-xs text-blue-600">
+            Churn formats accepted: decimal probability (e.g., <code className="bg-blue-50 p-1 rounded">0.12</code>) or percent (e.g., <code className="bg-blue-50 p-1 rounded">12%</code>). The parser normalizes percent values to 0–1. Empty churn values will be set to 0 and can be estimated by the Churn Predictor if you enable the heuristic.
+          </div>
         </div>
 
         <div className="flex flex-col sm:flex-row items-center space-y-4 sm:space-y-0 sm:space-x-4">
@@ -244,36 +297,130 @@ const DataDashboard = ({ onDataUpload, showCustomModal, seedInitialData, showToa
             onChange={handleFileUpload}
             className="flex-1 w-full text-sm text-gray-900 border border-gray-300 rounded-lg cursor-pointer bg-gray-50 focus:outline-none file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700"
           />
-          <button
-            onClick={handleProcessFile}
-            disabled={!file || loading}
-            className="w-full sm:w-auto px-6 py-2 text-white bg-green-600 hover:bg-green-700 focus:ring-4 focus:ring-green-300 font-medium rounded-lg shadow transition disabled:bg-gray-400 disabled:cursor-not-allowed"
-          >
-            {loading ? 'Processing...' : `Process File ${file ? `(${file.name})` : ''}`}
-          </button>
         </div>
 
-        {previewHeaders.length > 0 && (
-          <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <HeaderSelector label="Date Column" value={mapping.dateKey} onChange={(v) => setMapping(prev => ({ ...prev, dateKey: v }))} />
-            <HeaderSelector label="MRR Column" value={mapping.mrrKey} onChange={(v) => setMapping(prev => ({ ...prev, mrrKey: v }))} />
-            <HeaderSelector label="ID / Name Column" value={mapping.idKey} onChange={(v) => setMapping(prev => ({ ...prev, idKey: v }))} />
+        {showMalformed && (
+          <div className="mt-4 p-3 rounded bg-red-50 border border-red-100 text-red-700 text-sm">
+            Warning: uploaded CSV does not appear to contain a recognizable Date, Name and/or MRR column. Please verify your headers or adjust the column selectors below.
           </div>
         )}
+        {previewHeaders.length > 0 && (
+          <>
+            {/* Suggested header picks (moved above preview) */}
+            <div className="mt-3 p-3 bg-yellow-50 rounded border border-yellow-100 text-sm">
+              {(() => {
+                    const suggestedDate = previewHeaders.find(h => /date|month|created_at|createdAt|uploadedAt|start_date|signupDate/i.test(h));
+                    const suggestedMrr = previewHeaders.find(h => /mrr|revenue|amount|value|price|monthly_revenue/i.test(h));
+                    const suggestedChurn = previewHeaders.find(h => /churn|churnProbability|churn_prob|churn_rate|churn%/i.test(h));
+                    const suggestedSupport = previewHeaders.find(h => /support|ticket|tickets|open_tickets|num_tickets/i.test(h));
+                    const suggestedLastActivity = previewHeaders.find(h => /lastActivity|last_activity|last_login|days_ago|days_inactive|inactive_days|lastSeen|last_seen/i.test(h));
+                    return (
+                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between">
+                        <div className="mb-2 sm:mb-0">
+                          <div><strong>Suggested Date:</strong> {suggestedDate || <span className="text-gray-500">(none detected)</span>}</div>
+                          <div><strong>Suggested MRR:</strong> {suggestedMrr ? suggestedMrr : <span className="text-gray-500">(none detected)</span>}</div>
+                          <div><strong>Suggested Churn:</strong> {suggestedChurn || <span className="text-gray-500">(none detected)</span>}</div>
+                          <div><strong>Suggested Support Tickets:</strong> {suggestedSupport || <span className="text-gray-500">(none detected)</span>}</div>
+                          <div><strong>Suggested Last Activity:</strong> {suggestedLastActivity || <span className="text-gray-500">(none detected)</span>}</div>
+                        </div>
+                        <div className="flex items-center space-x-2">
+                          <button className="px-3 py-1 bg-green-600 text-white rounded text-sm" onClick={() => {
+                            // accept suggestions into mapping if present
+                            setMapping(prev => ({ ...prev, dateKey: suggestedDate || prev.dateKey, mrrKey: suggestedMrr || prev.mrrKey, churnKey: suggestedChurn || prev.churnKey, supportKey: suggestedSupport || prev.supportKey, lastActivityKey: suggestedLastActivity || prev.lastActivityKey }));
+                            (showToast || showCustomModal)('Suggested header mapping applied.', 'success');
+                          }}>Accept Suggestions</button>
+                          <button className="px-3 py-1 bg-gray-100 rounded text-sm" onClick={() => { setMapping({ dateKey: null, mrrKey: 'MRR', idKey: 'id', churnKey: null, supportKey: null, lastActivityKey: null }); (showToast || showCustomModal)('Reset header mapping.', 'info'); }}>Reset</button>
+                        </div>
+                      </div>
+                    );
+                  })()}
+            </div>
+
+            <div className="mt-4 grid grid-cols-1 sm:grid-cols-4 gap-4">
+              <HeaderSelector label="Date Column" value={mapping.dateKey} onChange={(v) => setMapping(prev => ({ ...prev, dateKey: v }))} />
+              <HeaderSelector label="MRR Column" value={mapping.mrrKey} onChange={(v) => setMapping(prev => ({ ...prev, mrrKey: v }))} />
+              <HeaderSelector label="Churn Column" value={mapping.churnKey} onChange={(v) => setMapping(prev => ({ ...prev, churnKey: v }))} />
+              <HeaderSelector label="Support Tickets Column" value={mapping.supportKey} onChange={(v) => setMapping(prev => ({ ...prev, supportKey: v }))} />
+              <HeaderSelector label="Last Activity Column" value={mapping.lastActivityKey} onChange={(v) => setMapping(prev => ({ ...prev, lastActivityKey: v }))} />
+              <HeaderSelector label="ID / Name Column" value={mapping.idKey} onChange={(v) => setMapping(prev => ({ ...prev, idKey: v }))} />
+            </div>
+          </>
+        )}
+
+        {/* Preview rows only */}
+            <div className="mt-6">
+          <div className="bg-white p-4 rounded border overflow-x-auto">
+            <h4 className="font-semibold text-gray-700 mb-2">Preview Rows</h4>
+            {previewRows.length === 0 ? (
+              <div className="text-xs text-gray-500">No preview available.</div>
+            ) : (
+              <div style={{ minWidth: Math.max(previewHeaders.length * 140, 600) }}>
+                <table className="w-full text-sm table-auto whitespace-nowrap">
+                  <thead>
+                    <tr>
+                          {previewHeaders.map(h => {
+                            const isMapped = h && (h === mapping.dateKey || h === mapping.mrrKey || h === mapping.churnKey || h === mapping.supportKey || h === mapping.lastActivityKey || h === mapping.idKey);
+                            return <th key={h} className={`text-left pr-4 font-medium text-gray-600`}>{h}</th>;
+                          })}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {previewRows.map((r, idx) => (
+                          <tr key={idx} className="border-t">
+                        {previewHeaders.map(h => <td key={h} className="py-1 pr-4">{r[h]}</td>)}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
         
         <div className="mt-4 flex justify-between items-center">
-            {uploadedCount > 0 && (
-                <p className="text-sm font-medium text-green-700">
-                    Loaded {uploadedCount} records.
-                </p>
-            )}
-      <button
+            <div className="flex items-center space-x-3">
+              <button
+                onClick={handleProcessFile}
+                disabled={!file || loading}
+                className="px-4 py-2 text-white bg-green-600 hover:bg-green-700 rounded shadow disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {loading ? 'Processing...' : `Process File ${file ? `(${file.name})` : ''}`}
+              </button>
+              {uploadedCount > 0 && (
+                <p className="text-sm font-medium text-green-700">Loaded {uploadedCount} records.</p>
+              )}
+            </div>
+      <button id="load-demo-btn"
         type="button"
-        aria-label="Seed initial sample data"
-        onClick={seedInitialData}
-        className="text-xs text-blue-500 hover:text-blue-700 transition"
+        aria-label="Load demo dataset"
+        onClick={async () => {
+          setLoading(true);
+          try {
+            const resp = await fetch('/demo_sample.csv');
+            const txt = await resp.text();
+            const parsed = parseCSV(txt, { dateKey: 'date', mrrKey: 'MRR', idKey: 'name' });
+            if (parsed && parsed.length) {
+              onDataUpload(parsed, { dateKey: 'date', mrrKey: 'MRR', idKey: 'name' });
+              setUploadedCount(parsed.length);
+              (showToast || showCustomModal)(`Loaded demo dataset (${parsed.length} rows)`, 'success');
+            } else {
+              (showToast || showCustomModal)('Demo data failed to parse.', 'error');
+            }
+          } catch (e) {
+            console.error('Load demo failed', e);
+            // Fallback for test environments (jsdom/no network): seed local dummy data instead
+            try {
+              seedInitialData();
+              (showToast || showCustomModal)('Loaded demo dataset (fallback seed).', 'info');
+            } catch (se) {
+              console.error('Fallback seed failed', se);
+              (showToast || showCustomModal)('Failed to load demo data.', 'error');
+            }
+          } finally { setLoading(false); }
+        }}
+        className="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 transition"
       >
-        Or, Seed Initial Sample Data
+        Load Demo
       </button>
         </div>
       </div>
@@ -334,7 +481,7 @@ const DataOverview = ({ overviewData }) => {
 };
 
 // Component 3: Time-Series Forecast (Recharts-based)
-const TimeSeriesForecast = ({ chartRef, monthlySeries = [], records = [], showCustomModal = () => {}, showToast = null }) => {
+const TimeSeriesForecast = ({ chartRef, monthlySeries = [], records = [], showCustomModal = () => {}, showToast = null, showToastRef = { current: null }, showCustomModalRef = { current: null } }) => {
   const [monthsOut, setMonthsOut] = useState(12);
   const [method, setMethod] = useState('linear'); // 'linear' or 'holt'
   // Holt smoothing parameters (persisted in localStorage)
@@ -406,12 +553,84 @@ const TimeSeriesForecast = ({ chartRef, monthlySeries = [], records = [], showCu
   const [exporting, setExporting] = useState(false);
   const [computingBootstrap, setComputingBootstrap] = useState(false);
   const asyncForecastRef = useRef(null); // holds latest async forecast promise (with revoke)
+  const prevForecastInputKeyRef = useRef(null);
+  // Dev diagnostic flag: set localStorage.setItem('JARVIS_DEV_DIAG','1') to enable lightweight logs
+  const devDiag = typeof window !== 'undefined' && !!localStorage.getItem('JARVIS_DEV_DIAG');
   // const bootstrapWorkerRef = useRef(null); // reserved for cancellation if needed
   // Linear regression on index -> value (sync + async bootstrap support)
 
   useEffect(() => {
     let cancelled = false;
+
+    // Build a compact, stable input key using a streaming FNV-1a hash so we avoid
+    // allocating a giant string for large datasets. We update the hash with
+    // small chunks (settings and each row) to produce a deterministic key.
+    const fnv1aInit = () => 2166136261 >>> 0;
+    const fnv1aUpdate = (h, str) => {
+      for (let i = 0; i < str.length; i++) {
+        h ^= str.charCodeAt(i);
+        h = Math.imul(h, 16777619) >>> 0;
+      }
+      return h;
+    };
+    const fnv1aDigest = (h) => (h >>> 0).toString(16);
+
+    let h = fnv1aInit();
+    // Add the config/settings
+    h = fnv1aUpdate(h, String(method));
+    h = fnv1aUpdate(h, '|');
+    h = fnv1aUpdate(h, String(monthsOut));
+    h = fnv1aUpdate(h, '|');
+    h = fnv1aUpdate(h, String(holtAlpha));
+    h = fnv1aUpdate(h, '|');
+    h = fnv1aUpdate(h, String(holtBeta));
+    h = fnv1aUpdate(h, '|');
+    h = fnv1aUpdate(h, holtBootstrap ? 'b' : 'n');
+    h = fnv1aUpdate(h, '|');
+    h = fnv1aUpdate(h, String(holtBootstrapSamples));
+    h = fnv1aUpdate(h, '|');
+    h = fnv1aUpdate(h, holtBootstrapAsync ? 'a' : 's');
+    h = fnv1aUpdate(h, '|');
+
+    // Stream the row data from monthlySeries (preferred) or fallback to records
+    if (monthlySeries && monthlySeries.length) {
+      h = fnv1aUpdate(h, String(monthlySeries.length));
+      for (let i = 0; i < monthlySeries.length; i++) {
+        const ms = monthlySeries[i];
+        // include period and numeric total as small updates
+        h = fnv1aUpdate(h, '|');
+        h = fnv1aUpdate(h, String(ms.period));
+        h = fnv1aUpdate(h, ':');
+        h = fnv1aUpdate(h, String(ms.total));
+      }
+    } else if (records && records.length) {
+      h = fnv1aUpdate(h, String(records.length));
+      for (let i = 0; i < records.length; i++) {
+        const r = records[i];
+        const period = r.period || r.date || '';
+        const val = r.total || r.MRR || '';
+        h = fnv1aUpdate(h, '|');
+        h = fnv1aUpdate(h, String(period));
+        h = fnv1aUpdate(h, ':');
+        h = fnv1aUpdate(h, String(val));
+      }
+    } else {
+      h = fnv1aUpdate(h, '0');
+    }
+
+    const inputKey = fnv1aDigest(h);
+
+    // If inputs haven't changed, skip recomputing
+    if (prevForecastInputKeyRef.current === inputKey) {
+      if (devDiag) console.debug('[jarvis] forecast effect skipped (inputKey unchanged)', inputKey);
+      return () => { cancelled = true; };
+    }
+    prevForecastInputKeyRef.current = inputKey;
+
+    if (devDiag) console.debug('[jarvis] forecast effect running, inputKey=', inputKey, { method, monthsOut, holtAlpha, holtBeta, holtBootstrap, holtBootstrapSamples, holtBootstrapAsync });
+
     setComputingBootstrap(true);
+
     // Use computeForecastFromRecords helper — it will aggregate monthly series and run forecast
     try {
       const maybe = computeForecastFromRecords(records && records.length ? records : (monthlySeries && monthlySeries.length ? monthlySeries.map(ms => ({ period: ms.period, total: ms.total })) : []), { method: method === 'holt' ? 'holt' : 'linear', monthsOut, holtOptions: { alpha: holtAlpha, beta: holtBeta, bootstrap: holtBootstrap, bootstrapSamples: holtBootstrapSamples, bootstrapAsync: holtBootstrapAsync } });
@@ -426,7 +645,8 @@ const TimeSeriesForecast = ({ chartRef, monthlySeries = [], records = [], showCu
         }).catch((err) => {
           asyncForecastRef.current = null;
           console.error('Async forecast failed', err);
-          (showToast || showCustomModal)('Async forecast failed. See console for details.', 'error');
+          // use refs to stable toast functions
+          try { (showToastRef.current || showCustomModalRef.current)('Async forecast failed. See console for details.', 'error'); } catch (e) {}
         }).finally(() => { if (!cancelled) setComputingBootstrap(false); });
       } else {
         // synchronous result
@@ -436,12 +656,13 @@ const TimeSeriesForecast = ({ chartRef, monthlySeries = [], records = [], showCu
       }
     } catch (err) {
       console.error('Forecast compute failed', err);
-      (showToast || showCustomModal)('Forecast compute failed. See console for details.', 'error');
+      try { (showToastRef.current || showCustomModalRef.current)('Forecast compute failed. See console for details.', 'error'); } catch (e) {}
       setComputingBootstrap(false);
     }
 
     return () => { cancelled = true; };
-  }, [records, monthlySeries, method, monthsOut, holtAlpha, holtBeta, holtBootstrap, holtBootstrapSamples, holtBootstrapAsync, showToast, showCustomModal]);
+  // note: showToast/showCustomModal use refs above so they are omitted from deps to avoid identity churn
+  }, [records, monthlySeries, method, monthsOut, holtAlpha, holtBeta, holtBootstrap, holtBootstrapSamples, holtBootstrapAsync]);
 
   // Render the forecast chart UI
   return (
@@ -546,7 +767,7 @@ const TimeSeriesForecast = ({ chartRef, monthlySeries = [], records = [], showCu
                   } catch (e) { console.error('Cancel revoke failed', e); }
                   asyncForecastRef.current = null;
                   setComputingBootstrap(false);
-                  setForecastResultState(prev => prev); // keep last known forecast displayed
+                  // keep last known forecast displayed — avoid calling setState with same value
                   (showToast || showCustomModal)('Bootstrap CI cancelled.', 'info');
                 }}>Cancel CI</button>
               </div>
@@ -573,6 +794,20 @@ const TimeSeriesForecast = ({ chartRef, monthlySeries = [], records = [], showCu
               </LineChart>
             </ResponsiveContainer>
           )}
+        </div>
+        {/* Explainability panel: shows chosen model and parameters in friendly text */}
+        <div className="mt-4 p-3 bg-gray-50 border border-dashed rounded text-sm text-gray-700">
+          <div className="flex items-start justify-between">
+            <div>
+              <strong>Model:</strong> {method === 'holt' ? 'Holt Linear (double exponential smoothing)' : 'Linear regression (OLS)'}
+              <div className="text-xs text-gray-600 mt-1">{method === 'holt' ? `α=${holtAlpha.toFixed(2)}, β=${holtBeta.toFixed(2)}${holtBootstrap ? `, bootstrap=${holtBootstrapSamples} samples${holtBootstrapAsync ? ' (async)' : ''}` : ''}` : `Slope projection over historical period`}</div>
+            </div>
+            <div className="text-right text-xs text-gray-500">
+              <div>{series.length} months of history</div>
+              <div>{monthsOut} months forecast</div>
+            </div>
+          </div>
+          <div className="mt-2 text-xs text-gray-500">Tip: use Auto-tune for Holt when you have at least 6 months of history. Bootstrap CIs estimate uncertainty — enable async mode for large sample counts.</div>
         </div>
       </div>
     </div>
@@ -881,7 +1116,7 @@ const WhatIfSimulation = ({ enhancedCustomers, showCustomModal, chartRef, showTo
 
 
 // Component 5: Churn Predictor (High-Risk Tracker)
-const ChurnPredictor = ({ enhancedCustomers, handleContactCustomer, seedInitialData }) => {
+const ChurnPredictor = ({ enhancedCustomers, handleContactCustomer, seedInitialData, computeChurnWhenMissing, setComputeChurnWhenMissing }) => {
 
     const CustomerTable = ({ customers, onContact, seedInitialData }) => (
         <div className="bg-white p-6 shadow-xl rounded-xl border border-red-100">
@@ -931,6 +1166,20 @@ const ChurnPredictor = ({ enhancedCustomers, handleContactCustomer, seedInitialD
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                             {c.lastActivityDays} days
+                            {c._churnComputed && (
+                              <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">computed churn</span>
+                            )}
+                            {c._churnProvided && (
+                              <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">provided</span>
+                            )}
+                            {c._churnComputed && c._churnDriver && (
+                              <span
+                                className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-indigo-100 text-indigo-800"
+                                title={c._churnContributions ? c._churnContributions.map(x => `${x.label}: ${(x.value*100).toFixed(0)}%`).join(' • ') : ''}
+                              >
+                                {c._churnDriver}
+                              </span>
+                            )}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                           {c.isContacted ? (
@@ -967,46 +1216,128 @@ const ChurnPredictor = ({ enhancedCustomers, handleContactCustomer, seedInitialD
         </div>
       );
     
-    return (
-        <div className="p-4 md:p-8">
-            <h2 className="text-3xl font-bold text-gray-900 mb-6 border-b pb-2">Churn Predictor: High-Risk Action List</h2>
-            {enhancedCustomers.length === 0 ? (
-                <NoDataMessage />
-            ) : (
-                <>
-                    <p className="text-gray-600 mb-6">
-                        This list ranks customers with a churn risk score of **40 or higher**. Prioritize contacting the highest-risk customers to improve retention.
-                    </p>
-                    <CustomerTable
-                        customers={enhancedCustomers}
-                        onContact={handleContactCustomer}
-                        seedInitialData={seedInitialData}
-                    />
-                </>
-            )}
-        </div>
-    );
+  return (
+    <div className="p-4 md:p-8">
+      <h2 className="text-3xl font-bold text-gray-900 mb-6 border-b pb-2">Churn Predictor: High-Risk Action List</h2>
+      {enhancedCustomers.length === 0 ? (
+        <NoDataMessage />
+      ) : (
+        <>
+          <div className="flex items-center justify-between mb-4">
+            <p className="text-gray-600">This list ranks customers with a churn risk score of <strong>40 or higher</strong>. Prioritize contacting the highest-risk customers to improve retention.</p>
+            <div className="flex items-center space-x-3">
+            <label className="flex items-center text-sm text-gray-600">
+              <input type="checkbox" checked={computeChurnWhenMissing} onChange={(e) => setComputeChurnWhenMissing(e.target.checked)} className="mr-2" />
+              Compute churn heuristically when missing
+            </label>
+            <button title="When enabled, the app will estimate churnProbability for rows that didn't provide it using a simple heuristic based on the computed risk score. Values computed this way will be marked in the table." className="text-xs text-gray-500 hover:text-gray-700">?</button>
+            </div>
+            <div className="mt-2 p-3 bg-gray-50 rounded text-sm text-gray-700">
+              <div className="mb-1 font-medium">How the toggle works</div>
+              <div className="text-xs mb-2">When enabled, the app will estimate a missing churnProbability from three observable features: Support Tickets, Days since last activity, and MRR. Use the <strong>Settings</strong> tab to adjust the relative importance (weights) of those features; weights are saved to your browser.</div>
+              {(() => {
+                // read current weights for a tiny inline preview
+                let current = { tickets: 0.5, activity: 0.35, mrr: 0.15 };
+                try { const raw = localStorage.getItem('jarvis_churn_weights_v1'); if (raw) current = JSON.parse(raw); } catch (e) {}
+                const sample = { MRR: 1200, supportTickets: 2, lastActivityDays: 10 };
+                // reuse estimator module
+                const estMod = require('./utils/churn');
+                const res = estMod.default(sample, current);
+                const est = (res && typeof res === 'object') ? (res.estimate || 0) : Number(res) || 0;
+                return (
+                  <div className="text-xs text-gray-600">
+                    <div>Current weights: Tickets {Math.round((current.tickets||0)*100)}% • Activity {Math.round((current.activity||0)*100)}% • MRR {Math.round((current.mrr||0)*100)}%</div>
+                    <div className="mt-1">Example (MRR 1200, 2 tickets, 10 days inactive): estimated churn ~ <strong className="text-blue-700">{(est*100).toFixed(1)}%</strong></div>
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+          <CustomerTable
+            customers={enhancedCustomers}
+            onContact={handleContactCustomer}
+            seedInitialData={seedInitialData}
+          />
+        </>
+      )}
+    </div>
+  );
 };
 
 
 // Component 6: Settings (Placeholder)
 const Settings = () => (
-    <div className="p-4 md:p-8">
-        <h2 className="text-3xl font-bold text-gray-900 mb-6 border-b pb-2">Settings & Configuration</h2>
-        <div className="p-8 bg-white rounded-xl shadow-xl border border-gray-200 space-y-4">
-            <div className="flex justify-between items-center border-b pb-4">
-                <label className="text-lg font-medium text-gray-700">Churn Model Weights</label>
-                <button className="text-blue-600 hover:text-blue-800 transition text-sm">Edit</button>
-            </div>
-            <p className="text-gray-600">
-                This section would allow users to adjust the weights used in the `calculateChurnRiskScore` function (e.g., how much `supportTickets` matters vs. `MRR`).
-            </p>
-            <div className="h-24 bg-gray-50 border border-dashed border-gray-300 rounded-lg mt-4 flex items-center justify-center text-gray-400">
-                [UI Placeholder for Weight Adjustment Sliders]
-            </div>
-        </div>
-    </div>
+    <SettingsInner />
 );
+
+// Separate component to enable hooks usage for settings
+const SettingsInner = () => {
+  const STORAGE_KEY = 'jarvis_churn_weights_v1';
+  const [weights, setWeights] = useState(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) return JSON.parse(raw);
+    } catch (e) {}
+    return { tickets: 0.5, activity: 0.35, mrr: 0.15 };
+  });
+
+  useEffect(() => {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(weights)); } catch (e) {}
+  }, [weights]);
+
+  const update = (k, v) => setWeights(prev => {
+    // ensure sum remains ~1 by normalizing after update
+    const next = { ...prev, [k]: v };
+    const s = (next.tickets || 0) + (next.activity || 0) + (next.mrr || 0) || 1;
+    return { tickets: (next.tickets || 0) / s, activity: (next.activity || 0) / s, mrr: (next.mrr || 0) / s };
+  });
+
+  return (
+    <div className="p-4 md:p-8">
+      <h2 className="text-3xl font-bold text-gray-900 mb-6 border-b pb-2">Settings & Configuration</h2>
+      <div className="p-8 bg-white rounded-xl shadow-xl border border-gray-200 space-y-4">
+        <div className="flex justify-between items-center border-b pb-4">
+          <label className="text-lg font-medium text-gray-700">Churn Estimator Weights</label>
+        </div>
+  <p className="text-gray-600">Adjust how the churn estimator weights features: Support Tickets, Last Activity (days), and MRR (lower MRR — higher risk).</p>
+        <div className="grid grid-cols-1 gap-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700">Support Tickets ({Math.round(weights.tickets * 100)}%)</label>
+            <input type="range" min="0" max="1" step="0.01" value={weights.tickets} onChange={(e) => update('tickets', Number(e.target.value))} className="w-full" />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700">Last Activity ({Math.round(weights.activity * 100)}%)</label>
+            <input type="range" min="0" max="1" step="0.01" value={weights.activity} onChange={(e) => update('activity', Number(e.target.value))} className="w-full" />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700">MRR ({Math.round(weights.mrr * 100)}%)</label>
+            <input type="range" min="0" max="1" step="0.01" value={weights.mrr} onChange={(e) => update('mrr', Number(e.target.value))} className="w-full" />
+          </div>
+        </div>
+        <div className="mt-4 p-4 bg-gray-50 rounded border text-sm">
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-sm text-gray-700 font-semibold">Estimator preview</div>
+            <div className="text-xs text-gray-500">Sample customer</div>
+          </div>
+          {/* sample customer used to preview weights */}
+          {(() => {
+            const estimateFn = require('./utils/churn').estimateChurnFromFeatures;
+            const sample = { MRR: 1200, supportTickets: 2, lastActivityDays: 10 };
+            const res = require('./utils/churn').default(sample, weights);
+            const estVal = res && typeof res === 'object' ? (res.estimate ?? 0) : Number(res) || 0;
+            return (
+              <div className="flex items-center justify-between">
+                <div className="text-xs text-gray-600">MRR 1200 • 2 tickets • 10 days inactive</div>
+                <div className="text-sm font-mono text-blue-700">{(estVal * 100).toFixed(1)}%</div>
+              </div>
+            );
+          })()}
+          <div className="mt-2 text-xs text-gray-500">This preview shows how the current slider weights influence a simple churn estimate. Values are illustrative.</div>
+        </div>
+      </div>
+    </div>
+  );
+};
 
 // No Data Message
 const NoDataMessage = () => (
@@ -1045,10 +1376,23 @@ const App = () => {
     showToast(message, type, timeout);
   }, [showToast]);
 
-  // Handler to receive uploaded data
-  const handleDataUpload = (newCustomers) => {
+  // Provide stable refs to the toast/modal functions so deeply nested effects
+  // (like TimeSeriesForecast) can call them without needing to include them
+  // in dependency lists which can cause identity churn.
+  const showToastRef = useRef(showToast);
+  const showCustomModalRef = useRef(showCustomModal);
+  useEffect(() => { showToastRef.current = showToast; }, [showToast]);
+  useEffect(() => { showCustomModalRef.current = showCustomModal; }, [showCustomModal]);
+
+  // notify helper uses the current ref value
+  const notify = useCallback((message, type = 'info', timeout = 3500) => {
+    try { return (showToastRef.current || (()=>{}))(message, type, timeout); } catch (e) { /* noop */ }
+  }, []);
+
+  // Handler to receive uploaded data (memoized to avoid identity churn)
+  const handleDataUpload = useCallback((newCustomers) => {
     setCustomers(newCustomers);
-  };
+  }, [setCustomers]);
 
   // Function to seed initial dummy data
   const seedInitialData = useCallback(() => {
@@ -1061,23 +1405,115 @@ const App = () => {
       { id: 'd6', name: 'Stratus AI', MRR: 7800, churnProbability: 0.09, supportTickets: 0, lastActivityDays: 1, contractLengthMonths: 36, isContacted: false },
       { id: 'd7', name: 'Bluewater Media', MRR: 600, churnProbability: 0.55, supportTickets: 2, lastActivityDays: 30, contractLengthMonths: 12, isContacted: false },
     ];
-    setCustomers(dummyCustomers);
+    // ensure seeded customers include churn provenance where churnProbability is provided
+    const seeded = dummyCustomers.map(c => ({ ...c, _churnProvided: !!(c.churnProbability || c.churnProbability === 0) }));
+    setCustomers(seeded);
     (showToast || showCustomModal)(`Successfully added ${dummyCustomers.length} initial customers to memory!`, 'success');
   }, [setCustomers, showCustomModal, showToast]);
+
+  // Toggle: compute churn heuristics for rows that did not provide churnProbability
+  const [computeChurnWhenMissing, setComputeChurnWhenMissing] = useState(true);
+  // churn estimator (require to keep module resolution simple in CRA tests)
+  // we keep both numeric and detailed exports in utils/churn
+  const estimateChurnFromFeatures = require('./utils/churn').estimateChurnFromFeatures; // numeric
+  const estimateChurnFromFeaturesDetailed = require('./utils/churn').default; // detailed
 
   // Calculate enhanced customer list (including risk score) whenever the raw customer list changes
   const enhancedCustomers = useMemo(() => {
     return customers.map(c => {
-      // Calculate the custom risk score
+      // If churn was not provided and user wants heuristics, compute from riskScore heuristically after riskScore calculation
       const riskScore = calculateChurnRiskScore(c);
       const riskLevel = riskScore >= 70 ? 'High' : riskScore >= 40 ? 'Medium' : 'Low';
-      return {
+      const base = {
         ...c,
         riskScore,
         riskLevel,
       };
+
+      // churn provenance flags: supplied (_churnProvided) vs computed (_churnComputed)
+      let churnProvided = !!c._churnProvided;
+      let churnComputed = false;
+
+  // Compute churn when the user enabled heuristics AND either the CSV didn't provide churn
+  // or the churn value is missing/zero. This makes the toggle more robust to uploads
+  // where the churn column may be present but cells are empty/zero.
+  if (computeChurnWhenMissing && (!churnProvided || !c.churnProbability || Number(c.churnProbability) === 0)) {
+        // try estimator using supportTickets / lastActivityDays / MRR
+        try {
+          // load persisted weights from Settings (if any)
+          let weights = null;
+          try { const raw = localStorage.getItem('jarvis_churn_weights_v1'); if (raw) weights = JSON.parse(raw); } catch (e) { weights = null; }
+          const res = estimateChurnFromFeaturesDetailed(c, weights || undefined);
+          // estimator returns { estimate, contributions, mainDriver, raw }
+          base.churnProbability = Math.max(0, Math.min(1, Number(res?.estimate) || 0));
+          // attach explainability info for UI
+          base._churnDriver = res?.mainDriver ? (res.mainDriver.label || res.mainDriver.key) : null;
+          base._churnContributions = res?.contributions || null;
+          churnComputed = true;
+        } catch (e) {
+          // fallback to riskScore heuristic
+          const v = Math.min(1, Math.max(0, riskScore / 100));
+          base.churnProbability = v;
+          base._churnDriver = null;
+          base._churnContributions = null;
+          churnComputed = true;
+        }
+      }
+
+      base._churnProvided = churnProvided;
+      base._churnComputed = churnComputed;
+
+      return base;
     }).sort((a, b) => b.riskScore - a.riskScore); // Sort by highest risk
-  }, [customers]);
+  }, [customers, computeChurnWhenMissing]);
+
+  // When the user enables/disables the heuristic toggle, apply or revert computed churn into
+  // the canonical `customers` state so Overview/Forecast views (which read `customers`) reflect it.
+  useEffect(() => {
+    // avoid running until estimator is available
+    if (!estimateChurnFromFeaturesDetailed) return;
+
+    if (computeChurnWhenMissing) {
+      // compute for rows that did not provide churn and aren't already computed
+      const weightsRaw = (() => { try { const raw = localStorage.getItem('jarvis_churn_weights_v1'); return raw ? JSON.parse(raw) : null;} catch (e) { return null; } })();
+      const updated = customers.map(c => {
+        const provided = !!c._churnProvided;
+        const hasChurn = c.churnProbability !== undefined && Number(c.churnProbability) !== 0;
+        if (!provided && !hasChurn && !c._churnComputed) {
+          try {
+            const res = estimateChurnFromFeaturesDetailed(c, weightsRaw || undefined);
+            return { ...c, _prevChurn: c.churnProbability, churnProbability: Math.max(0, Math.min(1, Number(res?.estimate) || 0)), _churnComputed: true, _churnDriver: res?.mainDriver ? (res.mainDriver.label || res.mainDriver.key) : null, _churnContributions: res?.contributions || null };
+          } catch (e) {
+            const fallback = Math.min(1, Math.max(0, calculateChurnRiskScore(c) / 100));
+            return { ...c, _prevChurn: c.churnProbability, churnProbability: fallback, _churnComputed: true };
+          }
+        }
+        return c;
+      });
+      // only set when something changed
+      const changed = updated.some((u, i) => u !== customers[i]);
+      if (changed) setCustomers(updated);
+    } else {
+      // revert computed churns back to previous values when toggle is disabled
+      const reverted = customers.map(c => {
+        if (c._churnComputed) {
+          const nc = { ...c };
+          if (nc._prevChurn !== undefined) {
+            nc.churnProbability = nc._prevChurn;
+          }
+          delete nc._prevChurn;
+          delete nc._churnComputed;
+          delete nc._churnDriver;
+          delete nc._churnContributions;
+          return nc;
+        }
+        return c;
+      });
+      const changed = reverted.some((u, i) => u !== customers[i]);
+      if (changed) setCustomers(reverted);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [computeChurnWhenMissing, customers]);
 
   // Handler to mark customer as contacted
   const handleContactCustomer = useCallback((customerId) => {
@@ -1131,6 +1567,15 @@ const App = () => {
   };
   }, [customers]);
 
+  // Onboarding modal (show once)
+  const [showOnboard, setShowOnboard] = useState(() => {
+    try { return !localStorage.getItem('jarvis_onboard_shown_v1'); } catch (e) { return true; }
+  });
+  const dismissOnboard = useCallback(() => {
+    try { localStorage.setItem('jarvis_onboard_shown_v1', '1'); } catch (e) {}
+    setShowOnboard(false);
+  }, []);
+
 
   const renderView = () => {
     switch (view) {
@@ -1139,11 +1584,11 @@ const App = () => {
       case 'overview':
         return <DataOverview overviewData={overviewData} />;
       case 'forecast':
-        return <TimeSeriesForecast chartRef={forecastChartRef} monthlySeries={overviewData.monthlySeries} showCustomModal={showCustomModal} showToast={showToast} />;
+        return <TimeSeriesForecast chartRef={forecastChartRef} monthlySeries={overviewData.monthlySeries} showCustomModal={showCustomModal} showToast={showToast} showToastRef={showToastRef} showCustomModalRef={showCustomModalRef} />;
       case 'simulation':
         return <WhatIfSimulation enhancedCustomers={enhancedCustomers} showCustomModal={showCustomModal} chartRef={simulationChartRef} showToast={showToast} />;
       case 'churn':
-        return <ChurnPredictor enhancedCustomers={enhancedCustomers} handleContactCustomer={handleContactCustomer} seedInitialData={seedInitialData} />;
+        return <ChurnPredictor enhancedCustomers={enhancedCustomers} handleContactCustomer={handleContactCustomer} seedInitialData={seedInitialData} computeChurnWhenMissing={computeChurnWhenMissing} setComputeChurnWhenMissing={setComputeChurnWhenMissing} />;
       case 'settings':
         return <Settings />;
       default:
@@ -1182,6 +1627,18 @@ const App = () => {
           </div>
         </div>
       </header>
+      {showOnboard && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40">
+          <div className="bg-white rounded-lg shadow-xl max-w-lg w-full p-6">
+            <h2 className="text-2xl font-bold mb-2">Welcome to Jarvis360</h2>
+            <p className="text-gray-600 mb-4">Quickly upload a CSV or load the demo data to see MRR forecasting, churn risk, and run what-if simulations — no setup required.</p>
+            <div className="flex justify-end space-x-2">
+              <button className="px-4 py-2 rounded text-sm bg-gray-100" onClick={dismissOnboard}>Dismiss</button>
+              <button className="px-4 py-2 rounded text-sm bg-blue-600 text-white" onClick={() => { dismissOnboard(); document.getElementById('load-demo-btn')?.click?.(); }}>Load Demo</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         {/* Navigation Tabs */}

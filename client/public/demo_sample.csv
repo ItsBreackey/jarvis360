@@ -1,0 +1,11 @@
+date,MRR,name,churnProbability,supportTickets,lastActivityDays
+2024-01-01,1200,Acme Corp,0.05,1,10
+2024-02-01,1250,Beta LLC,0.02,0,5
+2024-03-01,1300,Gamma Inc,0.03,2,20
+2024-04-01,1400,Delta Co,0.04,1,15
+2024-05-01,1500,Epsilon Ltd,0.06,0,8
+2024-06-01,1600,Zeta GmbH,0.02,0,3
+2024-07-01,1700,Theta SA,0.03,1,12
+2024-08-01,1800,Iota Oy,0.02,0,6
+2024-09-01,1900,Kappa Pty,0.01,0,2
+2024-10-01,2000,Lambda BV,0.02,1,9

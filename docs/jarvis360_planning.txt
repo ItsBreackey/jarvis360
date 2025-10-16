@@ -1,0 +1,448 @@
+# jArvIs360 Planning Document
+
+## Overview
+This document outlines the functional components, design considerations, and product strategy guidance for jArvIs360 — a forecasting, pipeline, and revenue analytics platform for SaaS businesses.
+
+---
+
+## Table of Contents
+1. Data & Integration Layer  
+2. Metrics & Core Computation Engine  
+3. Forecasting & Predictive Module  
+4. Pipeline / Deal Management & Scoring  
+5. Dashboarding & Visualization  
+6. Alerts, Insights & Notifications  
+7. Workflow & Collaboration  
+8. Security, Reliability & Compliance  
+9. Admin & Configuration / Setup  
+10. Learning, Adaptation & Model Improvement  
+11. Integration & Ecosystem  
+- Do’s & Don’ts (Design / Product Strategy Guidance)  
+- jArvIs360 Technical Implementation Roadmap (V2)
+
+---
+
+## 1. Data & Integration Layer
+- Connectors to CRMs (Salesforce, HubSpot, etc.), sales pipeline tools, marketing platforms, billing/subscription systems
+- ETL / ingestion pipelines (batch, streaming) with scheduling, retry, error handling
+- Data cleaning, deduplication, normalization, validation
+- Data mapping & schema management (user field mapping)
+- Staleness / freshness checks, data health alerts
+- Audit logging for ingestion / transformation steps
+- Support multiple data sources and unify into a canonical model
+
+## 2. Metrics & Core Computation Engine
+- Compute key SaaS metrics: MRR, ARR, bookings, expansion, contraction, churn, net revenue retention, cohort metrics, LTV, CAC
+- Rolling/lagged metrics (e.g., trailing 3-month churn)
+- Support for cohort analysis (by acquisition month, segment)
+- Time-based aggregation (daily, weekly, monthly, quarterly)
+- Revenue attribution (region, product line, customer segment, channel)
+- Macro / external factor modifiers (manual adjustments / sensitivity inputs)
+
+## 3. Forecasting & Predictive Module
+- Multiple forecast methods:
+    - Straight-line / trend / moving average
+    - Historical growth model
+    - Pipeline / stage-based / weighted pipeline
+    - Cohort forecasting
+    - Segmented forecasting (new vs renewal vs expansion)
+    - AI / ML forecasting (time series, regression)
+    - Ensemble / hybrid approaches
+- Scenario modeling (best / base / worst)
+- Forecast granularity (weekly, monthly, quarterly)
+- Override & adjustment interface (manual corrections)
+- Lag / activation delay modeling (onboarding / ramp)
+- Decay / staleness weighting for aged deals
+- Forecast vs actual error tracking
+- Confidence intervals, prediction bounds, sensitivity analysis
+- Automated reforecasting / rolling forecasts
+
+## 4. Pipeline / Deal Management & Scoring
+- Import / sync deals with pipeline stages, probabilities, close dates, amounts
+- Deal scoring / health indicators (based on historical patterns, signals)
+- Mandatory fields and validation (close date, status, notes)
+- Probability / win rate per stage
+- Decay logic for deals stuck too long
+- Alerts / flags on deals that deviate
+- “What-if” adjustments (e.g., shifting close date) to simulate impact
+
+## 5. Dashboarding & Visualization
+- Modular dashboards per user / role (sales, finance, exec)
+- Prebuilt templates for revenue forecast, churn analysis, pipeline health, cohort trends
+- Drill-downs: aggregate → segment → individual deal / customer
+- Time series / trend views, bar / line charts, waterfall charts, funnel charts
+- Forecast vs actual variance visuals
+- Scenario comparison views
+- Export / embed / share reports (PDF, CSV, image)
+- Custom widget support or drag-and-drop dashboards
+
+## 6. Alerts, Insights & Notifications
+- Anomaly detection (unexpected churn spikes, revenue dips)
+- Notifications / alerts for forecast deviations, pipeline shortfalls, at-risk deals
+- Automated insights / recommendations (e.g., “renewal pipeline is weak, consider incentives”)
+- Natural language summaries or “insight cards”
+- Scheduled reports / digests (daily, weekly) via email or integrated channels (Slack, Teams)
+
+## 7. Workflow & Collaboration
+- Forecast review workflows (submit → review → approve)
+- Comments / annotations on dashboards / forecasts / deals
+- Versioning and snapshotting (save state of forecast at time X)
+- Role-based access / permissions (who can edit, override, view)
+- Audit trails (who changed what, when)
+
+## 8. Security, Reliability & Compliance
+- Encryption in transit & at rest
+- Authentication (SSO, MFA)
+- Row / column / object-level permissions
+- Logging, monitoring, alerting on system health
+- SLA / uptime guarantees
+- Compliance with regional data laws (e.g., Kenya, GDPR)
+- Backup & disaster recovery plans
+
+## 9. Admin & Configuration / Setup
+- Sales funnel / pipeline stage configuration
+- Probability / weighting rules configuration
+- Forecast model defaults & user override settings
+- Time zone, currency, date format settings
+- User management, roles, teams
+- Onboarding wizard / guided setup
+- Data import / seed utilities
+- Health check / data quality dashboards
+
+## 10. Learning, Adaptation & Model Improvement
+- Model retraining / adjustment over time based on forecast error
+- Feedback loop from forecast vs actual to refine model parameters
+- Incorporate new features / signals (usage metrics, NPS, engagement) into forecasts
+- Baseline benchmarking / industry or peer cohort comparisons
+
+## 11. Integration & Ecosystem
+- APIs (read/write) for embedding or third-party consumption of forecasts, dashboards
+- Webhooks for alerting / events
+- Integrations with communication tools (Slack, MS Teams), BI tools (Looker, PowerBI), spreadsheet tools
+- Plug-ins / connectors for billing / subscription platforms, accounting systems
+- Embeddable visual components for client portals
+
+---
+
+## Do’s & Don’ts (Design / Product Strategy Guidance)
+
+### Do’s
+- Start with core, simple forecasting models; add complexity later
+- Make overrides / adjustments easy for users
+- Enforce data hygiene and validation
+- Provide explanation / transparency of forecast derivation
+- Support scenario planning and “what-if” outcomes
+- Track forecast accuracy & learning
+- Include collaboration and review workflows
+- Allow modular adoption of features
+- Build extensibility for custom metrics or signals
+- Use short time windows first (weekly/monthly)
+
+### Don’ts
+- Don’t trust forecasts blindly — provide caveats and human review
+- Don’t mix revenue types without segmentation (new, renewal, expansion)
+- Don’t let stale deals dominate forecasts — use decay/expiry logic
+- Don’t rely purely on subjective sales rep calls
+- Don’t pursue perfect accuracy; aim for consistent improvement
+- Don’t force monolithic adoption — enable incremental use
+- Don’t neglect external variables (seasonality, macro trends)
+- Don’t obscure assumptions — make them visible
+- Don’t ignore user feedback — capture edits/overrides to improve models
+
+---
+
+## jArvIs360 Technical Implementation Roadmap (V2)
+
+### Overview
+A modular, AI-driven, data-persistent single-file React/Tailwind app backed by Firestore and the Gemini API.
+
+#### 1. Data & Integration Layer (Persistent Storage & Client-Side ETL)
+- Firebase initialization and authentication on app load (signInWithCustomToken or signInAnonymously)
+- Firestore path convention: /artifacts/${__app_id}/users/${userId}/...
+- Pipeline configs in /pipeline_configs mapping raw fields to canonical metrics
+- Simulated data ingestion UI (text area) saved to /raw_data
+- Client-side ETL processor: transforms raw data to /processed_data
+
+#### 2. Metrics & Core Computation Engine
+- Compute metrics (MRR, ARR, churn, LTV) from /processed_data
+- Client-side time aggregation (daily/weekly/monthly)
+- Cohort analysis implemented client-side
+
+#### 3. Forecasting & Predictive Module (Gemini API)
+- Async Gemini calls (gemini-2.5-flash-preview-05-20) returning structured JSON forecasts and confidence intervals
+- Separate Gemini calls for narrative insights
+- Lightweight client-side baseline models (straight-line/trend) for fast responses
+- Scenario modeling via React state and stored “what-if” variables
+- Loading indicator during Gemini calls
+
+#### 4. Pipeline / Deal Management & Scoring
+- Pipeline UI driven by pipeline_configs
+- Simulated data sync via user updates to /raw_data
+- Client-side decay/staleness logic for deals
+
+#### 5. Dashboarding & Visualization (Modular)
+- Central JAVIS_CONFIG object for modules, metrics, colors, prompt IDs
+- Dynamic rendering based on currentModule state
+- Tailwind-based visual components (no external chart libraries)
+- Real-time updates via Firestore onSnapshot
+
+#### 6. Alerts, Insights & Notifications
+- Insight cards display Gemini narrative output
+- Client-side anomaly detection rules (e.g., Churn > 2x average)
+
+#### 7. Workflow & Collaboration
+- Comments stored in sub-collections (e.g., /comments) per dashboard module
+- Real-time comments via onSnapshot
+- Versioning: snapshot /processed_data and forecasts for audit
+
+#### 8. Security, Reliability & Compliance
+- Enforced authentication and data isolation
+- Exponential backoff and retry logic for Gemini API calls
+- Robust try...catch error handling and user-friendly UI feedback
+
+#### 9. Admin & Configuration / Setup
+- Pipeline config editor as core admin UI
+- JAVIS_CONFIG stores defaults, overridable by users
+- Display userId in UI for identification (Canvas environment)
+
+#### 10. Learning, Adaptation & Model Improvement
+- Store forecast vs actual in /forecast_accuracy
+- Use error history as feedback to refine prompts or models
+
+#### 11. Integration & Ecosystem
+- Treat Gemini integration as primary external AI point
+- Mock webhook/alert UI for Slack/Teams integrations
+
+---
+
+## Technical Do’s & Don’ts (Summary)
+- Use centralized JAVIS_CONFIG for modular UI
+- Enforce data isolation per userId
+- Show loading states for data and AI calls
+- Implement exponential backoff for Gemini calls
+- Display model transparency (confidence intervals, assumptions)
+- Use onSnapshot for real-time rendering
+- Avoid external chart libraries for V1
+- Don’t hardcode department data; rely on JAVIS_CONFIG
+- Use custom modals (not alert/confirm)
+- Prefer onSnapshot over one-off Firestore queries
+
+---
+
+## Next Steps
+- Share the existing project file(s) or repository access
+- Identify priority features to implement first (e.g., auth + Firestore paths, client-side ETL, basic forecasting)
+- Begin iterative implementation: scaffolding → data ingestion → metrics → AI integration
+
+
+
+Planning Version 3
+Recommendations — prioritized (top → bottom)
+
+Critical / High ROI (low risk, small effort)
+Add chart-specific refs for reliable export/copy targets
+
+Why: current export code queries the DOM for the first .recharts-wrapper svg. That can pick the wrong chart if multiple charts exist.
+What to do: add React refs to the Forecast and Simulation chart containers and pass those refs to exportSvgToPng / copySvgToClipboard.
+Risk: tiny. Effort: ~20–40 min.
+Benefit: reliable exports for each chart.
+Wrap showCustomModal in useCallback
+
+Why: reduces needless re-renders / keeps downstream useCallback stable (React rule-of-hooks warning showed this).
+What to do: define showCustomModal with useCallback so handlers like seedInitialData and handleContactCustomer won't get a changing dependency.
+Risk: zero. Effort: 5–10 min.
+Benefit: small perf improvement and removes lint warnings.
+Remove unused imports (useEffect)
+
+Why: simple cleanup; reduces linter noise.
+Effort: 2 min.
+UX & usability (medium effort)
+Make Forecast section usable (implement minimal forecasting pipeline)
+
+Why: currently a placeholder. Implementing a simple trend + seasonal decomposition fallback (or a small Holt-Winters / linear projection) gives immediate value.
+What to do: parse the dataset to monthly series, detect date column, calculate monthly aggregates, run a simple extrapolation, show confidence interval, and provide CSV export (already mostly added).
+Risk: medium (need robust parsing of user CSVs). Effort: 2–6 hours for a pragmatic, robust implementation (depending on edge cases you want covered).
+CSV upload validation + nicer errors on Data Dashboard
+
+Why: users often upload CSVs with different header formats. Improve header mapping and show friendly error hints (which headers were missing / mismatched).
+What to do: validate header set, show missing columns and sample preview, offer a mapping UI to map nonstandard headers.
+Risk: medium. Effort: 2–8 hours (mapping UI adds more time).
+Scenario management improvements for What‑If Simulation
+
+Add persistence (optional) and allow naming / tagging scenarios. Also implement scenario comparison table that shows cumulative impact (MRR saved, ROI).
+Risk: low/medium. Effort: 1–3 hours.
+Analytics and AI-style summaries (low to medium effort)
+Better automatic metric detection & preview in Data Overview
+
+Why: getPrimaryMetric heuristics could mis-pick; provide a one-click selector of numeric columns.
+Effort: 20–40 min.
+Improve AI summaries to include short action items & confidence level
+
+Why: current summaries are templates. Add data-driven heuristics (top drivers, volatility, recommended next step).
+Effort: 1–2 hours for heuristics; more if you want LLM-based summaries.
+Churn & retention workflow (medium impact)
+Reintroduce contact workflow with templated outreach & CSV export for contact lists
+
+What: Add a "Prepare Outreach" action that exports selected high-risk customers with prefilled email templates (or copy-to-clipboard).
+Benefit: Immediately useful for customer success teams.
+Effort: 1–2 hours.
+Add cohort view & lifetime value (LTV) estimate
+
+Why: helps prioritize customers better than a single risk score.
+Effort: 4–8 hours (data permitting).
+Performance, reliability, and developer experience
+Memoize heavy computations and use web workers for large CSV parsing
+Why: parsing many rows can block the main thread. For big datasets, move parsing to a web worker or chunk it.
+Risk: medium. Effort: 3–6 hours to add worker and safe messaging.
+Add unit tests for core functions (calculateChurnRiskScore, parseCSV, simulation logic)
+Benefit: reduces regressions as you add features.
+Effort: 1–3 hours for a handful of tests.
+Visual polish & accessibility (low effort)
+Color contrast checks & accessible component roles
+Why: several badges and small text may not have ideal contrast. Run automated color contrast checks and add aria-labels for interactive controls.
+Effort: 30–60 min.
+Keyboard accessible chart interactions (tooltip/legend focus)
+Effort: 1–2 hours.
+Advanced, optional features (higher effort / optional)
+LLM-driven insights (serverless or client-side)
+Use a secure LLM to write human-readable insights and pragmatic next steps. Requires secrets & usage policy.
+Effort: 4–10 hours to integrate safely and produce good prompts.
+Real forecasting backend using Prophet or a small FastAPI service
+Move heavy forecasting off the client and run a production-grade model.
+Effort: days; larger scope.
+Concrete PR-style changes I can implement now (pick 1–3)
+A. Chart refs + reliable export targets (recommended first)
+
+Add React refs to Forecast and Simulation charts.
+Use those refs for Download Image and Copy Image buttons instead of querySelector.
+Also update buttons’ aria-label and disabled state when ref not ready.
+Estimated time: 20–40 minutes. Low risk.
+
+
+Data to implement for SaaS
+Top-level categories (with key metrics)
+Revenue & retention (core)
+MRR (Monthly Recurring Revenue)
+What: Sum of recurring revenue recognized each month.
+Formula: sum(customer.MRR)
+Why: Primary health metric for subscription businesses.
+ARR (Annual Recurring Revenue)
+Formula: MRR * 12
+New MRR / Expansion MRR / Contraction MRR / Churned MRR
+Why: Decompose MRR movement by source (new business, expansions, downgrades, churn).
+Net Revenue Retention (NRR)
+Formula: (Starting MRR + Expansion MRR - Churned MRR - Contraction MRR) / Starting MRR
+Target: >100% is excellent. 90–100% common; <90% is a red flag.
+Gross Revenue Retention (GRR)
+Formula: (Starting MRR - Churned MRR - Contraction MRR) / Starting MRR
+Churn Rate (by MRR and by customers / logos)
+Simple: churned_customers / starting_customers (over period)
+MRR churn uses MRR lost instead of count.
+Target: SaaS benchmark varies by stage — low churn <1% monthly for mature B2B SaaS; early-stage B2C is higher.
+Customers & unit economics
+Customer Count (active)
+New Customers (adds)
+Logo Churn (customer churn %)
+ARPU / ARPA (Average Revenue Per Account)
+Formula: MRR / active_customers
+Customer Acquisition Cost (CAC)
+Formula: total_sales_and_marketing_spend / new_customers_acquired
+LTV (Customer Lifetime Value)
+Simple LTV = ARPU / churn_rate (monthly) * gross_margin (or more advanced cohort-based LTV)
+LTV:CAC ratio; Payback Period (months to recover CAC)
+Targets: LTV:CAC >= 3 desirable; payback < 12 months desirable (varies by business)
+Growth & pipeline
+New ARR / New bookings
+Win rate, average deal size (ACV), sales cycle length
+Pipeline coverage (sum(weighted pipeline) / sales target)
+Forecast coverage (how much of revenue is in the forecast)
+Product usage & engagement
+DAU, WAU, MAU and DAU/MAU (stickiness)
+Active seats / usage per customer
+Feature adoption rates (percent of customers using feature X)
+Time to activation / Time to Value (TTV)
+Why: correlates with churn and conversion.
+Customer success & satisfaction
+NPS (Net Promoter Score), CSAT
+Support tickets per customer, First Response Time, Resolution Time
+% contacted (for churn mitigation workflows)
+Financial & operational
+Gross margin (subscription gross margin)
+Burn rate, runway
+EBITDA, operating margin (for later-stage businesses)
+Forecasting & ML-specific
+Forecast accuracy / MAPE / RMSE
+Compare predictions vs actuals (weekly/monthly).
+Forecast bias (systematic over/under-prediction)
+Coverage of forecasts (confidence interval width)
+Forecast vs actual error breakdown by cohort/segment
+Cohort & segmentation metrics
+Churn by cohort (acquisition month, plan)
+MRR by cohort over time (cohort retention curves)
+Expansion/contraction by segment (plan, industry, ARR band)
+Priority recommendations for jArvIs360 (what to implement first)
+Start with a compact “core KPI set” that delivers the most value quickly:
+
+MRR, New MRR, Churned MRR, Expansion MRR, Net Revenue Retention (NRR)
+Why: shows revenue health and growth quality.
+Data required: customer.id, customer.MRR, dates of changes or monthly snapshots.
+Customer Count, New Customers, Customer Churn Rate (logo churn)
+Data required: customer list + dates created / deleted.
+ARPU and basic LTV estimate
+Data required: MRR per customer, churn rate.
+Forecast Accuracy (when you have forecasts)
+Why: objective measure to improve models.
+Data required: forecasted MRR by period + actual MRR by period.
+Cohort retention (monthly cohort table)
+Why: reveals whether churn is improving for recent cohorts.
+Data: created_at / acquisition_date and monthly MRR snapshots.
+Implement these first — they enable most decisions (sales, CS, product).
+
+Data fields you should collect / normalize (minimum)
+customer.id (unique)
+customer.name
+customer.MRR (numeric)
+created_at / acquisition_date
+last_activity_days (or last_activity_at)
+churned_at (if churn event occurs)
+supportTickets (count) and last support interaction date
+plan / product tier
+optional: seat counts, ARR components, contract start/end, billing cadence
+Data normalization and versioning note:
+
+Keep timestamped snapshots (monthly) rather than trying to reconstruct historical MRR from current state unless you have event logs — snapshots make forecasts and cohort analysis reliable.
+Visualizations that work well for each metric
+MRR / ARR: area + line chart (stack New/Expansion/Contraction/Churn as stacked bars or waterfall).
+NRR: line with threshold band; show numeric % and trend.
+Churn (by cohort): heatmap/table with retention rates by cohort month.
+ARPU / LTV: KPI cards + trend sparklines.
+Forecast vs Actual: line chart with shaded confidence intervals and error band.
+Pipeline: funnel or stacked bar by stage + weighted pipeline line.
+Customer segmentation: Pareto bar chart (top 20% customers by MRR) and distribution histograms.
+Benchmarks & targets (very approximate; vary by segment)
+NRR: >100% great; 90–100% average; <90% risky.
+Monthly logo churn: <1% (mature B2B), 2–5% for SMB/early-stage.
+LTV:CAC: >3 recommended; >5 ideal for top-tier models.
+CAC payback: <12 months preferred in growth stage (but context matters).
+Forecast MAPE: depends on horizon and model; <10–20% for monthly horizons is strong.
+Edge cases & data quality traps
+Missing or inconsistent MRR (e.g., currency, annual vs monthly billing) — always normalize to monthly values.
+Backfilled data and late-arriving updates: snapshot versioning helps.
+Small sample sizes in cohorts lead to noisy churn metrics — show confidence or counts alongside percentages.
+Discounts, credits, refunds change MRR — model them explicitly as positive/negative adjustments.
+Quick implementation suggestions for jArvIs360 (practical next steps)
+Minimum viable KPI dashboard (30–90 min):
+Compute MRR, total customers, ARPU, avg MRR, and churn rate in overviewData (you already compute some).
+Add NRR and a small chart showing New vs Churned vs Expansion MRR per month (if monthly snapshots available).
+Add a simple cohort table for user acquisition month -> retention MRR for first 6 months.
+Add forecast accuracy collection: store forecasted MRR vs actuals and surface MAPE per month.
+Tiny contract (for any metric implementation)
+Inputs: a normalized array of customers or monthly snapshots (objects with { id, MRR, date, plan, ... }).
+Outputs: numeric KPI(s) and an optional timeseries (period => value).
+Error modes: missing date, missing numeric MRR, mismatched currencies, zero customers.
+Success criteria: accurate aggregation by month, stable results across filters, pass simple unit tests (e.g., known inputs produce expected sums).
+Sample edge-case unit tests to add
+
+Single customer MRR aggregation over months.
+Churn rate when one customer churns mid-month.
+NRR calculation when expansion equals churn.
