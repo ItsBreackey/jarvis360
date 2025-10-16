@@ -131,19 +131,50 @@ test('register -> login via API cookies -> upload -> save scenario -> server has
     // Click Process File (use force to avoid intermittent overlay click interception)
     await page.locator('button:has-text("Process File")').first().click({ force: true });
 
-  // Give the client a moment to process the uploaded file
-  await page.waitForTimeout(500);
+  // Wait for client processing to settle. Prefer waiting for a known overlay to hide, but fall back to a short timeout.
+  try {
+    await page.waitForSelector('div.fixed.inset-0.z-50', { state: 'hidden', timeout: 30000 });
+  } catch (e) {
+    // overlay didn't appear or didn't hide; continue with additional checks
+    await page.waitForTimeout(1000);
+  }
 
-  // Instead of clicking the UI Save button (flaky in CI/dev), create the dashboard via the API
+  // Ensure Save button is visible and enabled
+  const saveBtn = page.locator('button[aria-label="Save scenario"]').first();
+  // If the Save button isn't present (app may still be on Data Dashboard), navigate to the Scenarios view
+  if ((await saveBtn.count()) === 0) {
+    const scenariosNav = page.locator('button[aria-label="Go to Scenarios"]').first();
+    try { await scenariosNav.click(); } catch (e) { await scenariosNav.click({ force: true }); }
+    // Wait for the scenarios view and Save button to render (longer timeout to avoid flakiness)
+    await page.waitForSelector('button[aria-label="Save scenario"]', { timeout: 15000 }).catch(() => {});
+  }
+  // final check: ensure visible with generous timeout
+  await expect(saveBtn).toBeVisible({ timeout: 15000 });
+  // Wait until the button is enabled (not disabled attribute)
+  await page.waitForFunction((sel) => {
+    const btn = document.querySelector(sel);
+    return !!btn && !btn.disabled;
+  }, {}, 'button[aria-label="Save scenario"]');
+
+  // Intercept the dashboard POST request so we can wait for a successful save triggered by the UI
+  const [saveReq] = await Promise.all([
+    page.waitForResponse((resp) => resp.url().includes('/api/dashboards/') && resp.request().method() === 'POST' && resp.status() < 500, { timeout: 15000 }),
+    // Click the Save button. Use a normal click first; fallback to force click if blocked.
+    (async () => {
+      try {
+        await saveBtn.click();
+      } catch (e) {
+        await saveBtn.click({ force: true });
+      }
+    })(),
+  ]);
+
+  // Confirm the save response was successful
+  expect(saveReq.ok()).toBeTruthy();
+
+  // Optionally verify server-side dashboards for the user using the API token we obtained earlier
   const access = cookieMap['access_token'];
   expect(access).toBeTruthy();
-  const createResp = await request.post(`${API_BASE}/api/dashboards/`, {
-    data: JSON.stringify({ name: 'e2e saved scenario', config: { source: 'e2e', uploadedFile: 'demo.csv' } }),
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${access}` },
-  });
-  expect(createResp.ok()).toBeTruthy();
-
-  // Verify server-side dashboards for the user
   const dashboardsResp = await request.get(`${API_BASE}/api/dashboards/`, { headers: { Authorization: `Bearer ${access}` } });
   expect(dashboardsResp.ok()).toBeTruthy();
   const list = await dashboardsResp.json();

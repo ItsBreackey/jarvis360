@@ -68,15 +68,3 @@ This section has moved here: [https://facebook.github.io/create-react-app/docs/d
 ### `npm run build` fails to minify
 
 This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
-
-## Scenario Export / Import (What-If Simulation)
-
-This project includes a What-If Simulation tool that allows you to model retention strategies and export/import scenarios.
-
-- Export JSON: saves a file named `scenario.json` containing the scenario parameters and a snapshot of simulation results.
-- Import JSON: load a previously exported `scenario.json` to restore the scenario parameters locally.
-- Autosave Draft: the simulation autosaves the current draft into `localStorage` under the key `jarvis_autosave_whatif_v1`. Use the "Restore Draft" button in the Scenarios tab to reload the draft.
-
-Pinned dependency versions are stored in `client/PINNED_VERSIONS.md` for reproducible installs.
-
-Note: The summarizer used to generate scenario summaries is a local heuristic and does not call external APIs by default.

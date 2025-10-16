@@ -26,8 +26,9 @@ if not SECRET_KEY:
 DEBUG = env.bool('DEBUG', default=True)
 
 ALLOWED_HOSTS = env.list('ALLOWED_HOSTS', default=[
-    'localhost', '127.0.0.1', 'testserver',
+    'localhost', '127.0.0.1'
 ])
+
 
 # Application definition
 
@@ -39,10 +40,9 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
-    'rest_framework.authtoken',
     'corsheaders',
-    'rest_framework_simplejwt.token_blacklist',
     'forecast',
+    'analysis', # ADDED the new analysis app
     'api',
     'django_extensions',
 ]
@@ -161,30 +161,4 @@ REST_FRAMEWORK = {
         'rest_framework.parsers.MultiPartParser',
         'rest_framework.parsers.FormParser',
     ],
-}
-
-# Enable token authentication for simple API access
-REST_FRAMEWORK['DEFAULT_AUTHENTICATION_CLASSES'] = [
-    'rest_framework.authentication.TokenAuthentication',
-    'rest_framework.authentication.SessionAuthentication',
-    'rest_framework_simplejwt.authentication.JWTAuthentication',
-]
-
-# Simple JWT settings: keep short access lifetime and use HttpOnly cookies in the frontend.
-from datetime import timedelta
-SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=15),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
-    'ROTATE_REFRESH_TOKENS': True,
-    'BLACKLIST_AFTER_ROTATION': True,
-    'ALGORITHM': 'HS256',
-}
-
-# drf-spectacular (OpenAPI) settings
-REST_FRAMEWORK['DEFAULT_SCHEMA_CLASS'] = 'drf_spectacular.openapi.AutoSchema'
-
-SPECTACULAR_SETTINGS = {
-    'TITLE': 'Jarvis360 API',
-    'DESCRIPTION': 'OpenAPI schema for Jarvis360',
-    'VERSION': '1.0.0',
 }
