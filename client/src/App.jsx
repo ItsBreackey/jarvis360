@@ -3,6 +3,7 @@ import './App.css';
 
 
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
+import auth from './utils/auth';
 import { parseCSV } from './utils/csv';
 import logo from './d2m_logo.png';
 import Toast from './Toast';
@@ -229,7 +230,26 @@ const DataDashboard = ({ onDataUpload, showCustomModal, seedInitialData, showToa
         }
 
         onDataUpload(customerData, mapping);
-        
+
+        // If authenticated, try to upload to server for persistence
+        try {
+          const meUser = await auth.me();
+          if (meUser && file) {
+            const form = new FormData();
+            form.append('file', file, file.name);
+            const resp = await auth.apiFetch('/api/uploads/', { method: 'POST', body: form });
+            if (resp.ok) {
+              (showToast || showCustomModal)(`Uploaded ${customerData.length} rows to server.`, 'success');
+            } else {
+              console.warn('Server upload failed', resp.status);
+              (showToast || showCustomModal)(`Local load succeeded; server upload failed (${resp.status}).`, 'warn');
+            }
+          }
+        } catch (e) {
+          console.error('Upload to server failed', e);
+          (showToast || showCustomModal)('Local load succeeded; server upload error. See console.', 'warn');
+        }
+
         setUploadedCount(customerData.length);
         (showToast || showCustomModal)(`Successfully loaded ${customerData.length} new customer records into memory!`, 'success');
       } catch (error) {
@@ -431,6 +451,75 @@ const DataDashboard = ({ onDataUpload, showCustomModal, seedInitialData, showToa
               Use the tabs above to navigate the different modules: view your **Data Overview**, predict churn in the **Churn Predictor**, or run scenarios in the **What-If Simulation**.
           </p>
       </div>
+    </div>
+  );
+};
+
+// Small AuthPanel to register/login/logout
+const AuthPanel = ({ showToast = null }) => {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [orgName, setOrgName] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [meUser, setMeUser] = useState(null);
+
+  const refreshMe = useCallback(async () => {
+    const u = await auth.me();
+    setMeUser(u ? u.username : null);
+  }, []);
+
+  useEffect(() => { refreshMe(); }, [refreshMe]);
+
+  const doRegister = async () => {
+    setLoading(true); setError(null);
+    try {
+      await auth.register({ username, password, org_name: orgName || username, set_cookie: true });
+      (showToast || (()=>{}))('Registration successful — logged in (cookie set).', 'success');
+      setUsername(''); setPassword(''); setOrgName('');
+      await refreshMe();
+    } catch (e) {
+      console.error('Register failed', e);
+      setError('Registration failed.');
+    } finally { setLoading(false); }
+  };
+
+  const doLogin = async () => {
+    setLoading(true); setError(null);
+    try {
+      await auth.login({ username, password, use_cookie: true });
+      (showToast || (()=>{}))('Login successful.', 'success');
+      setUsername(''); setPassword('');
+      await refreshMe();
+    } catch (e) {
+      console.error('Login failed', e);
+      setError('Login failed. Check credentials.');
+    } finally { setLoading(false); }
+  };
+
+  const doLogout = async () => {
+    await auth.logout();
+    (showToast || (()=>{}))('Logged out.', 'info');
+    setMeUser(null);
+  };
+
+  if (meUser) {
+    return (
+      <div className="flex items-center space-x-2">
+        <div className="text-xs text-gray-600">{meUser ? `Signed in as ${meUser}` : `Signed in`}</div>
+        <button className="px-3 py-1 text-xs bg-red-100 text-red-700 rounded" onClick={doLogout}>Logout</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center space-x-2">
+      <input placeholder="org (for register)" value={orgName} onChange={(e) => setOrgName(e.target.value)} className="text-xs p-1 rounded border" />
+      <input placeholder="username" value={username} onChange={(e) => setUsername(e.target.value)} className="text-xs p-1 rounded border" />
+      <input placeholder="password" value={password} onChange={(e) => setPassword(e.target.value)} type="password" className="text-xs p-1 rounded border" />
+      <button className="px-3 py-1 bg-green-600 text-white rounded text-xs" disabled={loading} onClick={doLogin}>Login</button>
+      <button className="px-3 py-1 bg-blue-600 text-white rounded text-xs" disabled={loading} onClick={doRegister}>Register</button>
+      {error && <div className="text-xs text-red-600">{error}</div>}
     </div>
   );
 };
@@ -837,6 +926,32 @@ const WhatIfSimulation = ({ enhancedCustomers, showCustomModal, chartRef, showTo
         } catch (e) {
           // ignore parse errors
         }
+        // Also attempt to fetch server-saved dashboards and merge when authenticated
+        (async () => {
+          try {
+            const meUser = await auth.me();
+            if (!meUser) return;
+            const resp = await auth.apiFetch('/api/dashboards/', { method: 'GET' });
+            if (!resp || !resp.ok) return;
+            const list = await resp.json().catch(() => null);
+            if (!Array.isArray(list)) return;
+            // Map server dashboards into local scenario shape if possible
+            const mapped = list.map(d => ({ id: `srv-${d.id}`, serverId: d.id, name: d.name || `Server Dashboard ${d.id}`, createdAt: d.created_at || d.createdAt || new Date().toISOString(), data: (d.config && d.config.data) || {} }));
+            // Merge server-saved dashboards before local ones (server-first)
+            setSavedScenarios(prev => {
+              // dedupe by serverId or id
+              const seen = new Set();
+              const combined = (mapped.concat(prev || [])).filter(s => {
+                const key = s.serverId ? `srv-${s.serverId}` : s.id;
+                if (seen.has(key)) return false; seen.add(key); return true;
+              }).slice(0,50);
+              try { localStorage.setItem(STORAGE_KEY, JSON.stringify(combined)); } catch (e) {}
+              return combined;
+            });
+          } catch (e) {
+            // ignore fetch errors (e.g., not authenticated or offline)
+          }
+        })();
       }, []);
 
       const persistScenarios = (list) => {
@@ -848,11 +963,43 @@ const WhatIfSimulation = ({ enhancedCustomers, showCustomModal, chartRef, showTo
         const id = Date.now().toString();
         const payload = { id, name, createdAt: new Date().toISOString(), data: whatIfData };
         const next = [payload].concat(savedScenarios).slice(0, 50); // keep recent 50
-        setSavedScenarios(next);
-        persistScenarios(next);
+        // if authenticated, persist to server as a Dashboard
+        (async () => {
+          try {
+            const meUser = await auth.me();
+            if (meUser) {
+              const payloadToServer = { name, config: { data: whatIfData } };
+              try {
+                const resp = await auth.apiFetch('/api/dashboards/', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payloadToServer) });
+                if (resp.ok) {
+                  const body = await resp.json().catch(() => null);
+                  if (body && body.id) {
+                    const merged = [{ ...payloadToServer, serverId: body.id, id }].concat(savedScenarios).slice(0,50);
+                    setSavedScenarios(merged);
+                    persistScenarios(merged);
+                  }
+                  (showToast || showCustomModal)(`Saved scenario "${name}" to server.`, 'success');
+                  return;
+                }
+                console.warn('Server save failed', resp.status);
+              } catch (e) {
+                console.error('Server save error', e);
+              }
+            }
+            // fallback local
+            setSavedScenarios(next);
+            persistScenarios(next);
+            (showToast || showCustomModal)(`Saved scenario "${name}"`, 'success');
+          } catch (e) {
+            console.error('Save scenario failed', e);
+            setSavedScenarios(next);
+            persistScenarios(next);
+            (showToast || showCustomModal)(`Saved scenario "${name}"`, 'success');
+          }
+        })();
+
         setScenarioName('');
         setSelectedScenarioId(id);
-        (showToast || showCustomModal)(`Saved scenario "${name}"`, 'success');
       };
 
       // Autosave current draft to localStorage on every change so users can restore later
@@ -1621,10 +1768,11 @@ const App = () => {
         </div>
       </div>
           <div className="flex items-center space-x-4 text-xs text-gray-500">
-            <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-semibold bg-blue-100 text-blue-800">
-              Local Memory Mode
-            </span>
-          </div>
+              <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-semibold bg-blue-100 text-blue-800`}>
+                Local Memory Mode
+              </span>
+              <AuthPanel showToast={showToast} />
+            </div>
         </div>
       </header>
       {showOnboard && (

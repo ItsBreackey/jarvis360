@@ -9,6 +9,17 @@ on:
 jobs:
   backend-tests:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_DB: jarvis
+          POSTGRES_USER: jarvis
+          POSTGRES_PASSWORD: jarvis
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U jarvis -d jarvis" --health-interval 10s --health-timeout 5s --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
@@ -19,9 +30,15 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      - name: Run Django tests
+      - name: Wait for Postgres
         run: |
-          python manage.py test --noinput
+          until pg_isready -h 127.0.0.1 -p 5432 -U jarvis; do sleep 1; done
+      - name: Apply migrations and run backend tests
+        env:
+          DATABASE_URL: postgres://jarvis:jarvis@127.0.0.1:5432/jarvis
+        run: |
+          python manage.py migrate --noinput
+          python manage.py test -v 2
 
   frontend-tests:
     runs-on: ubuntu-latest

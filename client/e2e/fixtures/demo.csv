@@ -1,0 +1,4 @@
+date,MRR,id,churnProbability
+2024-01-01,100,acct-1,0.05
+2024-02-01,120,acct-2,0.02
+2024-03-01,110,acct-3,0.10

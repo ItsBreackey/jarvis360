@@ -1,5 +1,6 @@
 from django.contrib import admin
 from .models import Organization, UploadedCSV, Dashboard
+from .models import UserProfile
 
 
 @admin.register(Organization)
@@ -15,6 +16,11 @@ class UploadedCSVAdmin(admin.ModelAdmin):
 @admin.register(Dashboard)
 class DashboardAdmin(admin.ModelAdmin):
 	list_display = ('id', 'name', 'org', 'created_by', 'updated_at')
+
+
+@admin.register(UserProfile)
+class UserProfileAdmin(admin.ModelAdmin):
+	list_display = ('id', 'user', 'org')
 
 from django.contrib import admin
 
