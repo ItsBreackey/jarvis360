@@ -1,4 +1,3 @@
-doc = Document()
 from docx import Document
 import sys
 from markdown import markdown
