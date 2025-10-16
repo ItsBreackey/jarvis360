@@ -24,4 +24,4 @@ See `.github/workflows/ci.yml` — CI runs backend tests and frontend tests on p
 
 ---
 
-For more details, open `docs/System_Documentation.md`.
+For more details, open `docs/System_Documentation.md`. Recent frontend updates include a Churn Predictor toggle that can estimate missing churn probabilities and Settings sliders to tune estimator weights.

@@ -17,6 +17,10 @@ This document summarizes the current state of the Jarvis360 project (backend, fr
 - Frontend improvements to UX for async bootstrap: clearer status indicator and an explicit Cancel CI button which revokes the in-flight async promise and preserves the last visible forecast.
 - Unit tests added/updated: CSV parse tests (including quoted field cases), forecast async path tests, and existing analytics tests all run under `client/` Jest harness.
 - CI workflow added: `.github/workflows/ci.yml` runs backend Django tests and frontend tests on push/PR.
+ - UI additions: onboarding modal (shown once) and a "Load Demo" button were added to accelerate activation. The Forecast view includes a small explainability panel that summarizes the chosen model and key parameters.
+ - Churn estimator & UX updates: added a Churn Predictor toggle ("Compute churn heuristically when missing") which, when enabled, will estimate missing churnProbability values using a simple explainable estimator based on Support Tickets, Days since last activity, and MRR. The estimator weights are adjustable in Settings and persisted to localStorage under the key `jarvis_churn_weights_v1`. Rows where churn was present in the CSV are flagged with `_churnProvided`; computed values are flagged with `_churnComputed` and include `_churnDriver` and `_churnContributions` metadata for explainability.
+ - Header mapping persistence: header mapping selections made in the Data Dashboard are persisted to localStorage under `jarvis_header_mapping_v1` to avoid re-mapping the same dataset repeatedly.
+ - Load Demo behavior: the Load Demo button is available in the Data Dashboard; it prefers to fetch `/demo_sample.csv` but will fall back to seeding local dummy data in offline or test environments to keep the app responsive and tests stable.
 
 ## CSV input expectations
 
