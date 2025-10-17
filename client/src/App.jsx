@@ -8,7 +8,8 @@ import { parseCSV } from './utils/csv';
 import logo from './d2m_logo.png';
 import Toast from './Toast';
 import ChurnChart from './ChurnChart';
-import { computeMonthlySeries as computeMonthlySeriesUtil, holtAutoTune, holtAutoTuneAdvanced } from './utils/analytics';
+import { computeMonthlySeries as computeMonthlySeriesUtil, holtAutoTuneAdvanced } from './utils/analytics';
+import runCancelableHoltAutoTune from './utils/holtWorker';
 import { generateScenarioSummary } from './utils/summarizer';
 import { LineChart, Line, Area, XAxis, YAxis, CartesianGrid, Tooltip as ReTooltip, ResponsiveContainer, Brush, Legend } from 'recharts';
 import { computeForecastFromRecords } from './utils/forecast';
@@ -581,6 +582,8 @@ const TimeSeriesForecast = ({ chartRef, monthlySeries = [], records = [], showCu
   const [holtBootstrapSamples, setHoltBootstrapSamples] = useState(storedHolt.bootstrapSamples || 200);
   const [holtBootstrapAsync, setHoltBootstrapAsync] = useState(storedHolt.bootstrapAsync || false);
   const [tuning, setTuning] = useState(false);
+  const tuningRef = useRef(null);
+  const [tuningProgress, setTuningProgress] = useState(0);
 
   // Prepare numeric series from monthlySeries: [{period: 'YYYY-MM', total}]
   const series = useMemo(() => {
@@ -780,16 +783,36 @@ const TimeSeriesForecast = ({ chartRef, monthlySeries = [], records = [], showCu
                       if (!series || series.length < 3) { (showToast || showCustomModal)('Not enough data to auto-tune (min 3 months).', 'warn'); return; }
                       (showToast || showCustomModal)('Running Holt auto-tune (fast search)...', 'info');
                       setTuning(true);
-                      // run tuner (synchronous but quick)
-                      const res = holtAutoTune(series, { alpha: holtAlpha, beta: holtBeta });
-                      setHoltAlpha(res.alpha);
-                      setHoltBeta(res.beta);
-                      localStorage.setItem(HOLTPREF, JSON.stringify({ alpha: res.alpha, beta: res.beta, bootstrap: holtBootstrap, bootstrapSamples: holtBootstrapSamples, bootstrapAsync: holtBootstrapAsync }));
-                      (showToast || showCustomModal)(`Auto-tune completed — α=${res.alpha.toFixed(2)}, β=${res.beta.toFixed(2)}, MSE=${res.mse.toFixed(1)}`, 'success');
+                      setTuningProgress(0);
+                      // Use cancelable worker
+                      const numericSeries = series.map(s => Number(s.total || 0));
+                      const runner = runCancelableHoltAutoTune(numericSeries, {
+                        alphaStart: 0.05, alphaEnd: 0.95, alphaStep: 0.05,
+                        betaStart: 0.05, betaEnd: 0.95, betaStep: 0.05,
+                        onProgress: (pct, best) => {
+                          setTuningProgress(pct);
+                          if (pct % 20 === 0) {
+                            try { (showToast || showCustomModal)(`Auto-tune progress ${pct}% — best MSE ${Number((best && best.sse) || 0).toFixed(1)}`, 'info'); } catch (e) {}
+                          }
+                        }
+                      });
+                      tuningRef.current = runner;
+                      const out = await runner.promise;
+                      tuningRef.current = null;
+                      if (out && out.alpha != null) {
+                        setHoltAlpha(out.alpha);
+                        setHoltBeta(out.beta);
+                        localStorage.setItem(HOLTPREF, JSON.stringify({ alpha: out.alpha, beta: out.beta, bootstrap: holtBootstrap, bootstrapSamples: holtBootstrapSamples, bootstrapAsync: holtBootstrapAsync }));
+                        (showToast || showCustomModal)(`Auto-tune completed — α=${out.alpha.toFixed(2)}, β=${out.beta.toFixed(2)}, SSE=${out.sse.toFixed(1)}`, 'success');
+                      }
                     } catch (err) {
-                      console.error('Auto-tune failed', err);
-                      (showToast || showCustomModal)('Auto-tune failed. See console for details.', 'error');
-                    } finally { setTuning(false); }
+                      if (err && err.message && err.message.indexOf('terminated') >= 0) {
+                        (showToast || showCustomModal)('Auto-tune cancelled.', 'info');
+                      } else {
+                        console.error('Auto-tune failed', err);
+                        (showToast || showCustomModal)('Auto-tune failed. See console for details.', 'error');
+                      }
+                    } finally { setTuning(false); setTuningProgress(0); }
                   }}>Auto-tune</button>
 
                   <button type="button" disabled={tuning} className="px-3 py-1 bg-violet-600 text-white rounded text-sm" onClick={async () => {
