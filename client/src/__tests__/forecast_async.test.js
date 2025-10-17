@@ -1,5 +1,4 @@
 import { computeForecastFromRecords } from '../utils/forecast';
-import { holtLinearForecast } from '../utils/analytics';
 
 // Mock holtLinearForecast to return a Promise-like object when bootstrapAsync is requested
 jest.mock('../utils/analytics', () => {

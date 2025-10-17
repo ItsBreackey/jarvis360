@@ -1,0 +1,11 @@
+# Ignore CSS and non-JS static assets in the client so ESLint doesn't try to parse them
+client/src/**/*.css
+client/src/**/*.scss
+client/src/**/*.png
+client/src/**/*.jpg
+client/src/**/*.jpeg
+client/src/**/*.gif
+client/src/**/*.svg
+
+# Ignore any other non-JS assets in client/src
+client/src/**/!(*.js|*.jsx)

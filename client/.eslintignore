@@ -1,0 +1,11 @@
+# Ignore CSS and image assets so ESLint doesn't attempt to parse them
+src/**/*.css
+src/**/*.scss
+src/**/*.png
+src/**/*.jpg
+src/**/*.jpeg
+src/**/*.gif
+src/**/*.svg
+
+# Optionally ignore any other non-JS assets in src
+src/**/!(*.js|*.jsx)

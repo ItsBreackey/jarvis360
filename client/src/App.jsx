@@ -1,41 +1,40 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, AreaChart, Area } from 'recharts';
-import { Zap, X, TrendingUp, Upload, AlertTriangle, CheckCircle, TrendingDown, Activity, UserCheck } from 'lucide-react';
+import './App.css';
 
 
-// --- UTILITY & SIMULATION FUNCTIONS ---
 
+import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
+import auth from './utils/auth';
+import { parseCSV } from './utils/csv';
+import logo from './d2m_logo.png';
+import Toast from './Toast';
+import ChurnChart from './ChurnChart';
+import { computeMonthlySeries as computeMonthlySeriesUtil, holtAutoTune, holtAutoTuneAdvanced } from './utils/analytics';
+import { generateScenarioSummary } from './utils/summarizer';
+import { LineChart, Line, Area, XAxis, YAxis, CartesianGrid, Tooltip as ReTooltip, ResponsiveContainer, Brush, Legend } from 'recharts';
+import { computeForecastFromRecords } from './utils/forecast';
 
-// --- Data Interfaces (Simplified to plain JS objects for JSX compatibility) ---
-
-/** @typedef {{ id: string, [key: string]: any }} GenericData */
-/** @typedef {{ id: string, name: string, MRR: number, churnProbability: number, supportTickets: number, lastActivityDays: number, contractLengthMonths: number, isContacted: boolean }} CustomerData */
-/** @typedef {CustomerData & { riskScore: number, riskLevel: 'High' | 'Medium' | 'Low' }} EnhancedCustomerData */
-
-// --- Utility Functions ---
+// --- Utility Functions (Core Logic) ---
 
 /**
  * Calculates a churn risk score (0-100) based on multiple factors.
- * @param {CustomerData} customer
- * @returns {number}
+ * @param {object} customer - Customer data object.
+ * @returns {number} The calculated risk score.
  */
 const calculateChurnRiskScore = (customer) => {
-  const MRR = parseFloat(String(customer.MRR)) || 0;
-  const churnProbability = parseFloat(String(customer.churnProbability)) || 0;
-  const supportTickets = parseFloat(String(customer.supportTickets)) || 0;
-  const lastActivityDays = parseFloat(String(customer.lastActivityDays)) || 0;
+  const { MRR, churnProbability, supportTickets, lastActivityDays } = customer;
 
-  // Weights for different factors
+  // Weights for different factors (sum should ideally be 1.0)
   const weightProbability = 0.5;
   const weightTickets = 0.2;
   const weightActivity = 0.2;
   const weightMRR = 0.1; 
 
-  // Normalize data and assign risk components (0 to 1)
-  let probRisk = churnProbability;
-  let ticketRisk = Math.min(supportTickets / 10, 1); 
-  let activityRisk = Math.min(lastActivityDays / 60, 1); 
-  let mrrRisk = 1 - Math.min(MRR / 2000, 1); // Low MRR increases risk
+  // Normalize data and assign risk components
+  let probRisk = parseFloat(churnProbability) || 0;
+  let ticketRisk = Math.min((parseFloat(supportTickets) || 0) / 10, 1); // 10+ tickets = max risk component
+  let activityRisk = Math.min((parseFloat(lastActivityDays) || 0) / 60, 1); // 60+ days of inactivity = max risk component
+  // Lower MRR is higher risk (small customers churn more easily)
+  let mrrRisk = 1 - Math.min((parseFloat(MRR) || 0) / 2000, 1); 
 
   const score = (
     (probRisk * weightProbability) +
@@ -44,13 +43,13 @@ const calculateChurnRiskScore = (customer) => {
     (mrrRisk * weightMRR)
   ) * 100;
 
-  return Math.max(0, Math.min(100, Math.round(score)));
+  return Math.max(0, Math.min(100, score));
 };
 
 /**
  * Formats a number into US dollar currency string.
- * @param {number} amount
- * @returns {string}
+ * @param {number} amount - The numeric amount to format.
+ * @returns {string} Formatted currency string.
  */
 const formatCurrency = (amount) => {
   return new Intl.NumberFormat('en-US', {
@@ -61,1223 +60,1769 @@ const formatCurrency = (amount) => {
   }).format(amount);
 };
 
+// (svg-to-png helpers removed) use html2canvas-based exporters below for full-container captures
 
-/**
- * Simple CSV parser for in-browser use. Assumes comma-separated values and a header row.
- * Attempts to convert values to numbers where appropriate.
- */
-const parseCSV = (text) => {
-    const lines = text.trim().split('\n');
-    if (lines.length < 2) return [];
-
-    // Simple header parsing, cleaning up quotes
-    const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
-    const data = [];
-
-    for (let i = 1; i < lines.length; i++) {
-        const values = lines[i].split(',');
-        if (values.length !== headers.length) continue; // Skip incomplete lines
-
-        const row = {};
-        headers.forEach((header, index) => {
-            let value = values[index].trim().replace(/"/g, '');
-            // Attempt to parse to number
-            const num = Number(value);
-            row[header] = isNaN(num) || value.length === 0 ? value : num;
-        });
-        data.push(row);
+// html2canvas helper (loaded dynamically from CDN as a fallback)
+let _html2canvasPromise = null;
+const ensureHtml2Canvas = () => {
+  if (_html2canvasPromise) return _html2canvasPromise;
+  _html2canvasPromise = (async () => {
+    // try dynamic import from local node_modules first
+    try {
+      const mod = await import('html2canvas');
+      return mod.default || mod;
+    } catch (e) {
+      // fallback to global CDN loader
+      if (typeof window.html2canvas !== 'undefined') return window.html2canvas;
+      await new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+        s.onload = () => resolve();
+        s.onerror = (err) => reject(err);
+        document.head.appendChild(s);
+      });
+      return window.html2canvas;
     }
-    return data;
+  })();
+  return _html2canvasPromise;
 };
 
-/**
- * Finds the primary metric (first suitable numeric column) from the dataset.
- */
-const getPrimaryMetric = (data) => {
-  if (!data || data.length === 0) return null;
-  const columns = Object.keys(data[0]);
-  return columns.find(col => typeof data[0][col] === 'number') || null;
-};
-
-
-// 1. Simulated AI Summary Generation (Uses actual uploaded data)
-const generateAISummary = (data, metric) => {
-  if (!data || data.length === 0 || !metric) {
-      return "Please upload a dataset to generate the AI Data Summary.";
-  }
-  
-  const numRecords = data.length;
-  const numCols = Object.keys(data[0] || {}).length;
-  
-  const metricValues = data.map(d => d[metric]);
-  const numericValues = metricValues.filter(v => typeof v === 'number');
-
-  if (numericValues.length === 0) {
-      return `The dataset contains ${numRecords} records with ${numCols} columns, but the primary metric '${metric}' has no numeric data for analysis.`;
-  }
-  
-  const avg = (numericValues.reduce((a, b) => a + b, 0) / numericValues.length).toFixed(2);
-  const avgFormatted = new Intl.NumberFormat('en-US').format(avg);
-  
-  return `**AI Data Summary**
-Analysis of uploaded data: The dataset contains **${numRecords} records** with **${numCols} columns**. The primary numeric column is **'${metric}'**. The average of this column is approximately **${avgFormatted}**. The data appears ready for analysis, suitable for time-series forecasting.`;
-};
-
-
-// 2. Simulated AI Forecast Generation (Uses actual uploaded data and period)
-const generateAIForecastSummary = (metric, periods) => {
-  const finalValue = Math.floor(Math.random() * 500) + 2000;
-  const lower = finalValue - 150;
-  const upper = finalValue + 150;
-  
-  return `**AI Forecast Summary**
-Forecast using the last 5 points of your data on metric **'${metric}'**. The model predicts a **consistent upward trend** over the next ${periods} periods. The 90% confidence interval suggests the value will be between **${lower} and ${upper}** at the final period, indicating moderate certainty. Watch out for potential seasonality, which this short sample data does not fully capture.`;
-};
-
-// 3. Simulation Logic for What-If Scenarios
-const calculateScenarioOutcome = (params) => {
-  const { baseMetric, costReduction, timeframe, saleIncrease } = params;
-  
-  // Simple compounded simulation over the timeframe (months)
-  let revenue = baseMetric;
-  let costBase = baseMetric * 0.7; // Assume 70% cost structure initially
-  
-  const results = [];
-
-  for (let i = 1; i <= timeframe; i++) {
-    // Apply sales growth and cost reduction over the period
-    revenue = revenue * (1 + (saleIncrease / 100 / 12));
-    costBase = costBase * (1 - (costReduction / 100 / 12));
-    
-    const profit = revenue - costBase;
-
-    results.push({
-      month: `M${i}`,
-      Revenue: revenue,
-      Profit: profit,
-      Costs: costBase
-    });
-  }
-  return results;
-};
-
-
-// --- UI COMPONENTS ---
-
-const NavItem = ({ icon: Icon, label, isActive, onClick }) => (
-  <button
-    onClick={onClick}
-    className={`flex items-center space-x-3 p-3 text-sm font-medium rounded-lg transition-all w-full text-left ${
-      isActive
-        ? 'bg-blue-600 text-white shadow-lg'
-        : 'text-gray-600 hover:bg-gray-100'
-    }`}
-  >
-    <Icon className="w-5 h-5" />
-    <span>{label}</span>
-  </button>
-);
-
-const SectionCard = ({ title, children, className = '' }) => (
-  <div className={`bg-white p-6 rounded-xl shadow-lg border border-gray-100 ${className}`}>
-    <h2 className="text-xl font-semibold mb-4 text-gray-800 border-b pb-2">{title}</h2>
-    {children}
-  </div>
-);
-
-const CustomSlider = ({ label, value, unit, min, max, step, onChange }) => (
-  <div className="mb-4">
-    <label className="text-sm font-medium text-gray-700 block mb-2">
-      {label}: <span className="font-bold text-blue-600">{new Intl.NumberFormat('en-US').format(value)}{unit}</span>
-    </label>
-    <input
-      type="range"
-      min={min}
-      max={max}
-      step={step}
-      value={value}
-      onChange={(e) => onChange(Number(e.target.value))}
-      className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer range-lg accent-blue-600"
-    />
-  </div>
-);
-
-const DataMissingPrompt = ({ message }) => (
-  <div className="flex flex-col items-center justify-center h-96 bg-gray-100 rounded-xl border-2 border-dashed border-gray-300 p-8 text-center">
-    <AlertTriangle className="w-12 h-12 text-yellow-500 mb-4" />
-    <h3 className="text-xl font-semibold text-gray-800">No Data Available</h3>
-    <p className="text-gray-600 mt-2">{message}</p>
-  </div>
-);
-
-
-// --- 1. DATA DASHBOARD SECTION (MODIFIED FOR UPLOAD & MOCK KPIS) ---
-
-const DataDashboard = ({ data, onDataUpload }) => {
-    const handleFileUpload = (event) => {
-        const file = event.target.files[0];
-        if (!file) return;
-
-        const reader = new FileReader();
-        reader.onload = (e) => {
-            try {
-                const text = e.target.result;
-                const parsedData = parseCSV(text);
-                onDataUpload(parsedData);
-            } catch (error) {
-                console.error("Error processing file:", error);
-                onDataUpload([]); // Clear data on error
-            }
-        };
-        reader.readAsText(file);
-    };
-
-    return (
-        <SectionCard title="Data Source & Upload">
-            <div className="mb-6 p-4 border border-blue-200 bg-blue-50 rounded-lg flex items-center space-x-3">
-                {data && data.length > 0 ? (
-                    <CheckCircle className="w-6 h-6 text-green-500" />
-                ) : (
-                    <AlertTriangle className="w-6 h-6 text-yellow-500" />
-                )}
-                <p className="text-gray-700">
-                    {data && data.length > 0
-                        ? `Dataset loaded successfully! Records: ${data.length}. Primary Metric: ${getPrimaryMetric(data) || 'N/A'}`
-                        : 'Please upload a CSV file below to begin analysis.'
-                    }
-                </p>
-            </div>
-
-            <div className="flex items-center space-x-4">
-                <label className="flex items-center justify-center px-4 py-3 bg-blue-500 text-white rounded-lg shadow-md cursor-pointer hover:bg-blue-600 transition-colors font-semibold">
-                    <Upload className="w-5 h-5 mr-2" />
-                    Upload CSV File
-                    <input type="file" accept=".csv" onChange={handleFileUpload} className="hidden" />
-                </label>
-            </div>
-            
-            {/* REINSTATED: Original Mock KPI section */}
-            <div className="mt-6 p-4 bg-gray-50 border border-gray-200 rounded-lg">
-                <h3 className="font-semibold text-gray-700">Interactive Data Dashboard (Mock KPIs)</h3>
-                <div className="flex flex-wrap gap-x-6 gap-y-2 mt-2">
-                    <p>Total Revenue: <span className="font-bold text-green-600">$12,000</span></p>
-                    <p>Active Users: <span className="font-bold text-blue-600">450</span></p>
-                    <p>Conversion Rate: <span className="font-bold text-purple-600">4.5%</span></p>
-                </div>
-            </div>
-
-            <div className="mt-6">
-                <h3 className="text-lg font-semibold mb-2">Data Preview ({data ? data.length : 0} Rows)</h3>
-                <div className="overflow-x-auto max-h-60 border rounded-lg">
-                    {data && data.length > 0 ? (
-                        <table className="min-w-full divide-y divide-gray-200">
-                            <thead className="bg-gray-50">
-                                <tr>
-                                    {Object.keys(data[0]).map(key => (
-                                        <th key={key} className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">{key}</th>
-                                    ))}
-                                </tr>
-                            </thead>
-                            <tbody className="bg-white divide-y divide-gray-200">
-                                {data.slice(0, 5).map((row, index) => (
-                                    <tr key={index} className="hover:bg-gray-50">
-                                        {Object.values(row).map((value, i) => (
-                                            <td key={i} className="px-4 py-2 whitespace-nowrap text-sm text-gray-700">
-                                                {typeof value === 'number' ? new Intl.NumberFormat('en-US').format(value) : String(value)}
-                                            </td>
-                                        ))}
-                                    </tr>
-                                ))}
-                                {data.length > 5 && (
-                                    <tr className="bg-gray-100">
-                                        <td colSpan={Object.keys(data[0]).length} className="px-4 py-2 text-center text-xs text-gray-500">
-                                            ... {data.length - 5} more rows hidden
-                                        </td>
-                                    </tr>
-                                )}
-                            </tbody>
-                        </table>
-                    ) : (
-                        <div className="p-4 text-center text-gray-500">No data to display. Please upload a CSV file.</div>
-                    )}
-                </div>
-            </div>
-        </SectionCard>
-    );
-};
-
-
-// --- 2. DATA OVERVIEW SECTION (DYNAMIC) ---
-
-const DataOverview = ({ data }) => {
-    const primaryMetric = useMemo(() => getPrimaryMetric(data), [data]);
-    const summaryText = useMemo(() => generateAISummary(data, primaryMetric), [data, primaryMetric]);
-
-    const dataStats = useMemo(() => {
-        if (!data || data.length === 0) return [];
-        
-        const columns = Object.keys(data[0]);
-        const numericColumns = columns.filter(col => typeof data[0][col] === 'number');
-        
-        return numericColumns.map(col => {
-          const values = data.map(d => d[col]);
-          const numericValues = values.filter(v => typeof v === 'number');
-          
-          if (numericValues.length === 0) return null;
-
-          const sum = numericValues.reduce((a, b) => a + b, 0);
-          const avg = (sum / numericValues.length).toFixed(2);
-          const min = Math.min(...numericValues);
-          const max = Math.max(...numericValues);
-          
-          return {
-            column: col,
-            average: new Intl.NumberFormat('en-US').format(avg),
-            min: new Intl.NumberFormat('en-US').format(min),
-            max: new Intl.NumberFormat('en-US').format(max),
-            count: numericValues.length,
-          };
-        }).filter(stat => stat !== null);
-    }, [data]);
-
-    if (!data || data.length === 0) {
-        return <DataMissingPrompt message="Go to the 'Data Dashboard' section to upload a CSV file before viewing the overview." />;
-    }
-
-    return (
-        <div className="space-y-6">
-            <SectionCard title="AI Data Summary">
-                <div className="p-4 bg-blue-50 rounded-lg text-blue-800 border border-blue-200">
-                    <p className="whitespace-pre-wrap" dangerouslySetInnerHTML={{ __html: summaryText.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>') }} />
-                </div>
-            </SectionCard>
-
-            <SectionCard title="Column Statistics Table">
-                <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-gray-200">
-                        <thead className="bg-gray-50">
-                            <tr>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Column</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Count</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Average</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Min</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Max</th>
-                            </tr>
-                        </thead>
-                        <tbody className="bg-white divide-y divide-gray-200">
-                            {dataStats.map((stat) => (
-                                <tr key={stat.column} className="hover:bg-gray-50">
-                                    <td className="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">{stat.column}</td>
-                                    <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-700">{stat.count}</td>
-                                    <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-700">{stat.average}</td>
-                                    <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-700">{stat.min}</td>
-                                    <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-700">{stat.max}</td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
-            </SectionCard>
-        </div>
-    );
-};
-
-
-// --- 3. TIME-SERIES FORECAST SECTION (DYNAMIC) ---
-
-const TimeSeriesForecast = ({ data }) => {
-    const [forecastPeriod, setForecastPeriod] = useState(5);
-    const primaryMetric = useMemo(() => getPrimaryMetric(data), [data]);
-
-    if (!data || data.length === 0 || !primaryMetric) {
-        return <DataMissingPrompt message="Please upload a dataset with at least one numeric column in the 'Data Dashboard' to run a forecast." />;
-    }
-
-    const forecastSummary = generateAIForecastSummary(primaryMetric, forecastPeriod);
-
-    // Dynamic Mock Forecast Data Generation based on last point of uploaded data
-    const lastDataPoint = data[data.length - 1];
-    const lastMonthValue = lastDataPoint ? lastDataPoint[primaryMetric] : 0;
-    
-    // Generate simple linear forecast for demonstration
-    const mockForecastData = Array.from({ length: forecastPeriod }, (_, i) => {
-        const base = lastMonthValue + (i + 1) * (lastMonthValue / 20); // 5% growth per period
-        const offset = Math.random() * 50 - 25;
-        const predicted = base + offset;
-        return {
-            Month: `Forecast ${i + 1}`,
-            [primaryMetric]: predicted,
-            LowerBound: predicted * 0.9,
-            UpperBound: predicted * 1.1,
-        };
-    });
-
-    // Combine historical and forecast data for charting
-    const combinedChartData = useMemo(() => {
-        const historical = data.map((d, index) => ({
-            ...d,
-            // Use index or first non-numeric column as chart X-axis key
-            x_axis_key: d.Month || `Period ${index + 1}`,
-            Actual: d[primaryMetric],
-            Predicted: null,
-            LowerBound: null,
-            UpperBound: null,
-        }));
-        
-        const forecast = mockForecastData.map(d => ({
-            x_axis_key: d.Month,
-            Actual: null,
-            Predicted: d[primaryMetric],
-            LowerBound: d.LowerBound,
-            UpperBound: d.UpperBound,
-        }));
-        
-        return [...historical, ...forecast];
-    }, [data, mockForecastData, primaryMetric]);
-    
-    // Helper function for download (reusing logic from previous mock)
-    const handleDownloadData = () => {
-        const csvContent = "data:text/csv;charset=utf-8," 
-          + "Month,Predicted Value,Lower Bound,Upper Bound" + "\n"
-          + mockForecastData.map(d => `${d.Month},${d[primaryMetric].toFixed(2)},${d.LowerBound.toFixed(2)},${d.UpperBound.toFixed(2)}`).join('\n');
-        const encodedUri = encodeURI(csvContent);
-        const link = document.createElement("a");
-        link.setAttribute("href", encodedUri);
-        link.setAttribute("download", "forecast_data.csv");
+// Export any element (container) to PNG using html2canvas
+const exportElementToPng = async (el, filename = 'chart.png', scale = 2) => {
+  if (!el) return false;
+  try {
+    const html2canvas = await ensureHtml2Canvas();
+    const canvas = await html2canvas(el, { scale: Math.max(1, scale), useCORS: true, backgroundColor: getComputedStyle(document.body).backgroundColor || '#fff' });
+    return new Promise((resolve) => {
+      canvas.toBlob((blob) => {
+        if (!blob) return resolve(false);
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = filename;
         document.body.appendChild(link);
         link.click();
-        document.body.removeChild(link);
-    };
-
-    return (
-        <div className="space-y-6">
-            <SectionCard title="Forecast Parameters">
-                <CustomSlider 
-                    label="Select Forecast Period" 
-                    value={forecastPeriod} 
-                    unit=" Periods" 
-                    min={1} 
-                    max={12} 
-                    step={1} 
-                    onChange={setForecastPeriod}
-                />
-                <div className="p-4 mt-4 bg-blue-50 rounded-lg text-blue-800 border border-blue-200">
-                    <p className="whitespace-pre-wrap" dangerouslySetInnerHTML={{ __html: forecastSummary.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>') }} />
-                </div>
-            </SectionCard>
-
-            <SectionCard title="Predicted Values & Confidence Interval">
-                <div className="h-96 w-full">
-                    <ResponsiveContainer width="100%" height="100%">
-                        <AreaChart data={combinedChartData}>
-                            <CartesianGrid strokeDasharray="3 3" stroke="#e0e0e0"/>
-                            <XAxis dataKey="x_axis_key" stroke="#555" />
-                            <YAxis stroke="#555" tickFormatter={(value) => new Intl.NumberFormat('en-US').format(value)} />
-                            <Tooltip formatter={(value) => new Intl.NumberFormat('en-US').format(value)} />
-                            <Legend />
-                            
-                            {/* Confidence Interval Area (Note: AreaChart must have continuous data for this to look right) */}
-                            <Area type="monotone" dataKey="UpperBound" stroke="none" fill="#A8DADC" fillOpacity={0.3} stackId="1" isAnimationActive={false} name="90% Upper Bound" />
-                            <Area type="monotone" dataKey="LowerBound" stroke="none" fill="#FFFFFF" fillOpacity={0} stackId="1" isAnimationActive={false} name="90% Lower Bound" />
-
-                            {/* Historical Data */}
-                            <Line type="monotone" dataKey="Actual" stroke="#10B981" strokeWidth={3} dot={{ r: 4 }} activeDot={{ r: 6 }} name={`Actual ${primaryMetric}`} />
-                            
-                            {/* Predicted Forecast Data */}
-                            <Line type="monotone" dataKey="Predicted" stroke="#3B82F6" strokeWidth={3} dot={{ r: 4 }} strokeDasharray="5 5" name={`Predicted ${primaryMetric}`} />
-                            
-                        </AreaChart>
-                    </ResponsiveContainer>
-                </div>
-                <div className="flex justify-center space-x-4 mt-4">
-                    {/* Placeholder for real export functionality */}
-                    <button className="flex items-center space-x-2 px-4 py-2 bg-blue-500 text-white rounded-lg shadow-md hover:bg-blue-600 transition-colors">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                        <span>Download Graph</span>
-                    </button>
-                    <button className="flex items-center space-x-2 px-4 py-2 bg-gray-500 text-white rounded-lg shadow-md hover:bg-gray-600 transition-colors">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-                        <span>Copy Graph to Clipboard</span>
-                    </button>
-                </div>
-            </SectionCard>
-
-            <SectionCard title="Forecasted Dataset">
-                <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-gray-200">
-                        <thead className="bg-gray-50">
-                            <tr>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Month</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Predicted {primaryMetric}</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">90% Lower Bound</th>
-                                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">90% Upper Bound</th>
-                            </tr>
-                        </thead>
-                        <tbody className="bg-white divide-y divide-gray-200">
-                            {mockForecastData.map((row, index) => (
-                                <tr key={index} className="hover:bg-gray-50">
-                                    <td className="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">{row.Month}</td>
-                                    <td className="px-4 py-3 whitespace-nowrap text-sm text-blue-600 font-semibold">{new Intl.NumberFormat('en-US').format(row[primaryMetric].toFixed(2))}</td>
-                                    <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-700">{new Intl.NumberFormat('en-US').format(row.LowerBound.toFixed(2))}</td>
-                                    <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-700">{new Intl.NumberFormat('en-US').format(row.UpperBound.toFixed(2))}</td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
-                <div className="flex justify-end mt-4">
-                    <button onClick={handleDownloadData} className="flex items-center space-x-2 px-4 py-2 bg-green-500 text-white rounded-lg shadow-md hover:bg-green-600 transition-colors">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 15v4c0 1.1.9 2 2 2h14a2 2 0 0 0 2-2v-4"/><polyline points="17 9 12 14 7 9"/><line x1="12" y1="14" x2="12" y2="3"/></svg>
-                        <span>Download Dataset</span>
-                    </button>
-                </div>
-            </SectionCard>
-        </div>
-    );
+        link.remove();
+        resolve(true);
+      }, 'image/png');
+    });
+  } catch (e) {
+    console.error('exportElementToPng failed', e);
+    return false;
+  }
 };
 
-
-// --- 4. WHAT-IF SIMULATION SECTION (DYNAMIC) ---
-
-const WhatIfSimulation = ({ data }) => {
-    const primaryMetric = useMemo(() => getPrimaryMetric(data), [data]);
-    
-    if (!data || data.length === 0 || !primaryMetric) {
-        return <DataMissingPrompt message="Please upload a dataset with a numeric column in the 'Data Dashboard' to run a What-If Simulation." />;
-    }
-
-    // Determine initial base metric from uploaded data (average of primary metric)
-    const metricValues = data.map(d => d[primaryMetric]).filter(v => typeof v === 'number');
-    const initialBaseMetric = metricValues.length > 0 ? metricValues.reduce((a, b) => a + b, 0) / metricValues.length : 100000;
-    
-    const initialScenario = {
-      baseMetric: Math.floor(initialBaseMetric), // Use the average or a sensible default
-      costReduction: 5,
-      timeframe: 12,
-      saleIncrease: 10,
-    };
-    
-    const [scenarios, setScenarios] = useState([]);
-    const [currentScenario, setCurrentScenario] = useState(initialScenario);
-    
-    // Calculate results for the current preview scenario
-    const previewResults = useMemo(() => calculateScenarioOutcome(currentScenario), [currentScenario]);
-    
-    // Handlers
-    const handleSliderChange = (key, value) => {
-        setCurrentScenario(prev => ({ ...prev, [key]: value }));
-    };
-
-    const handleAddScenario = () => {
-        const scenarioName = `Scenario ${scenarios.length + 1}`;
-        const newScenario = {
-          id: Date.now(),
-          name: scenarioName,
-          params: currentScenario,
-          results: previewResults,
-          color: `#${Math.floor(Math.random()*16777215).toString(16).padStart(6, '0')}`, // Random color
-        };
-        setScenarios(prev => [...prev, newScenario]);
-    };
-
-    const handleResetScenarios = () => {
-        setScenarios([]);
-        setCurrentScenario(initialScenario); // Reset current scenario to dynamic initial state
-    };
-    
-    const handleDeleteScenario = (id) => {
-        setScenarios(prev => prev.filter(s => s.id !== id));
-    };
-    
-    // Data for the main multi-scenario chart
-    const allScenarios = scenarios.length > 0 ? scenarios : [{ 
-        id: 'preview', 
-        name: 'Current Preview', 
-        results: previewResults, 
-        color: '#FF9800' // Use orange for preview
-    }];
-
-    const multiScenarioChartData = useMemo(() => {
-        
-        // Find the longest timeframe to set the chart length
-        const maxMonths = allScenarios.reduce((max, s) => Math.max(max, s.results.length), 0);
-        
-        const chartData = [];
-        for (let i = 0; i < maxMonths; i++) {
-            const dataPoint = { month: `M${i + 1}` };
-            allScenarios.forEach(s => {
-                if (s.results[i]) {
-                    // Show Profit for comparison
-                    dataPoint[`${s.name} Profit`] = s.results[i].Profit;
-                }
-            });
-            chartData.push(dataPoint);
-        }
-        return chartData;
-
-    }, [scenarios, previewResults]);
-
-
-    return (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* Left Column: Parameters and Controls */}
-            <div className="lg:col-span-1 space-y-6">
-                <SectionCard title="Scenario Parameters" className="h-full">
-                    <CustomSlider 
-                        label={`Base Metric for Simulation (${primaryMetric} Avg.)`} 
-                        value={currentScenario.baseMetric} 
-                        unit="" 
-                        min={100} 
-                        max={Math.max(200000, currentScenario.baseMetric * 2)} // Dynamic max
-                        step={100} 
-                        onChange={(v) => handleSliderChange('baseMetric', v)}
-                    />
-                    <CustomSlider 
-                        label="Cost Reduction" 
-                        value={currentScenario.costReduction} 
-                        unit="%" 
-                        min={0} 
-                        max={30} 
-                        step={1} 
-                        onChange={(v) => handleSliderChange('costReduction', v)}
-                    />
-                    <CustomSlider 
-                        label="Timeframe" 
-                        value={currentScenario.timeframe} 
-                        unit=" Months" 
-                        min={3} 
-                        max={60} 
-                        step={3} 
-                        onChange={(v) => handleSliderChange('timeframe', v)}
-                    />
-                    <CustomSlider 
-                        label="Sale Increase" 
-                        value={currentScenario.saleIncrease} 
-                        unit="%" 
-                        min={0} 
-                        max={50} 
-                        step={1} 
-                        onChange={(v) => handleSliderChange('saleIncrease', v)}
-                    />
-                    <div className="flex space-x-3 mt-6">
-                        <button 
-                            onClick={handleAddScenario} 
-                            className="flex-1 flex items-center justify-center space-x-2 px-4 py-3 bg-green-500 text-white rounded-lg shadow-md hover:bg-green-600 transition-colors font-semibold"
-                        >
-                            <TrendingUp className="w-5 h-5"/>
-                            <span>Add Scenario</span>
-                        </button>
-                        <button 
-                            onClick={handleResetScenarios} 
-                            className="flex-1 flex items-center justify-center space-x-2 px-4 py-3 bg-red-500 text-white rounded-lg shadow-md hover:bg-red-600 transition-colors font-semibold"
-                        >
-                            <X className="w-5 h-5"/>
-                            <span>Reset All</span>
-                        </button>
-                    </div>
-                </SectionCard>
-            </div>
-
-            {/* Right Column: Graphs */}
-            <div className="lg:col-span-2 space-y-6">
-                <SectionCard title={scenarios.length === 0 ? "Current Scenario Preview (Profit)" : "Multi-Scenario Comparison (Profit)"}>
-                    {/* Scenario Labels/Delete Buttons */}
-                    {scenarios.length > 0 && (
-                        <div className="flex flex-wrap gap-2 mb-4">
-                            {scenarios.map(s => (
-                                <div key={s.id} className="flex items-center space-x-2 p-2 rounded-full text-sm font-medium text-white shadow-md transition-all" style={{ backgroundColor: s.color }}>
-                                    <span>{s.name}</span>
-                                    <button onClick={() => handleDeleteScenario(s.id)} className="p-0.5 rounded-full bg-white bg-opacity-30 hover:bg-opacity-50 transition-colors">
-                                        <X className="w-3 h-3 text-white"/>
-                                    </button>
-                                </div>
-                            ))}
-                        </div>
-                    )}
-                    
-                    <div className="h-96 w-full">
-                        <ResponsiveContainer width="100%" height="100%">
-                            <LineChart data={multiScenarioChartData}>
-                                <CartesianGrid strokeDasharray="3 3" stroke="#e0e0e0" />
-                                <XAxis dataKey="month" stroke="#555" />
-                                <YAxis stroke="#555" tickFormatter={(value) => `$${new Intl.NumberFormat('en-US').format((value / 1000).toFixed(0))}k`} />
-                                <Tooltip formatter={(value) => [`$${new Intl.NumberFormat('en-US').format(parseFloat(value).toFixed(2))}`, 'Profit']} />
-                                <Legend />
-                                {multiScenarioChartData.length > 0 && 
-                                    Object.keys(multiScenarioChartData[0]).filter(k => k.includes('Profit')).map((dataKey) => {
-                                        const scenario = allScenarios.find(s => `${s.name} Profit` === dataKey);
-                                        return (
-                                            <Line 
-                                                key={dataKey} 
-                                                type="monotone" 
-                                                dataKey={dataKey} 
-                                                stroke={scenario ? scenario.color : '#FF9800'} 
-                                                strokeWidth={2} 
-                                                dot={false}
-                                                name={dataKey.replace(' Profit', '')}
-                                                strokeDasharray={dataKey.includes('Preview') ? '3 3' : '0'} // Dotted line for preview
-                                            />
-                                        );
-                                    })
-                                }
-                            </LineChart>
-                        </ResponsiveContainer>
-                        {scenarios.length === 0 && <p className="text-center text-sm text-gray-500 mt-2">Add a scenario to save it, or modify parameters for a live preview.</p>}
-                    </div>
-                </SectionCard>
-            </div>
-        </div>
-    );
+// Copy an element's rasterized PNG to clipboard
+const copyElementToClipboard = async (el, scale = 2) => {
+  if (!el || !navigator.clipboard) return false;
+  try {
+    const html2canvas = await ensureHtml2Canvas();
+    const canvas = await html2canvas(el, { scale: Math.max(1, scale), useCORS: true, backgroundColor: getComputedStyle(document.body).backgroundColor || '#fff' });
+    const blob = await new Promise((res) => canvas.toBlob(res, 'image/png'));
+    if (!blob) return false;
+    const clipboardItem = new ClipboardItem({ 'image/png': blob });
+    await navigator.clipboard.write([clipboardItem]);
+    return true;
+  } catch (e) {
+    console.error('copyElementToClipboard failed', e);
+    return false;
+  }
 };
 
+// CustomModal removed in favor of toasts. showCustomModal routes to showToast below.
 
-// --- CHURN PREDICTOR SUB-COMPONENTS ---
-
-// Subcomponent: Dedicated Churn Data Uploader
-/** @param {{ onDataUpload: (data: CustomerData[]) => void, showCustomModal: (msg: string) => void, seedInitialData: () => void }} props */
-const ChurnDataUploader = ({ onDataUpload, showCustomModal, seedInitialData }) => {
-    const [file, setFile] = useState(null);
-    const [loading, setLoading] = useState(false);
-    const [uploadedCount, setUploadedCount] = useState(0);
-
-    /** @param {string} csvText */
-    const parseCSV = (csvText) => {
-        const lines = csvText.trim().split('\n');
-        if (lines.length <= 1) return [];
-
-        const headers = lines[0].split(',').map(h => h.trim().toLowerCase().replace(/[^a-z0-9]/g, ''));
-        
-        const headerMap = {
-            'mrr': 'MRR', 'churnprobability': 'churnProbability', 'supporttickets': 'supportTickets', 
-            'lastactivitydays': 'lastActivityDays', 'contractlengthmonths': 'contractLengthMonths', 'name': 'name'
-        };
-
-        const data = [];
-        for (let i = 1; i < lines.length; i++) {
-            const values = lines[i].split(',');
-            if (values.length < headers.length) continue;
-
-            /** @type {Partial<CustomerData> & { id: string, isContacted: boolean }} */
-            const obj = { id: i.toString() + '_' + Date.now(), isContacted: false };
-            let hasRequiredFields = false;
-
-            for (let j = 0; j < headers.length; j++) {
-                const cleanKey = headers[j];
-                const originalKey = headerMap[cleanKey]; 
-                let value = values[j] ? values[j].trim() : '';
-                
-                if (originalKey) {
-                    if (['MRR', 'churnProbability', 'supportTickets', 'lastActivityDays', 'contractLengthMonths'].includes(originalKey)) {
-                        obj[originalKey] = parseFloat(value) || 0;
-                        if (originalKey === 'MRR') hasRequiredFields = true;
-                    } else if (originalKey === 'name') {
-                        obj.name = value || `Customer ${i}`;
-                    }
-                }
-            }
-            if (hasRequiredFields && obj.name) {
-                data.push(/** @type {CustomerData} */ (obj));
-            }
-        }
-        return data;
-    };
-
-    /** @param {React.ChangeEvent<HTMLInputElement>} e */
-    const handleFileUpload = (e) => {
-        const uploadedFile = e.target.files?.[0];
-        if (uploadedFile && uploadedFile.name.endsWith('.csv')) {
-            setFile(uploadedFile);
-            setUploadedCount(0);
-        } else {
-            setFile(null);
-            showCustomModal("Please upload a valid CSV file.");
-        }
-    };
-
-    const handleProcessFile = async () => {
-        if (!file) { showCustomModal("No valid file selected."); return; }
-        setLoading(true);
-        const reader = new FileReader();
-
-        reader.onload = async (event) => {
-            try {
-                const customerData = parseCSV(event.target?.result);
-                if (customerData.length === 0) { showCustomModal("Could not parse any valid data from the CSV. Ensure required headers are present."); setLoading(false); return; }
-                onDataUpload(customerData);
-                setUploadedCount(customerData.length);
-                showCustomModal(`Successfully loaded ${customerData.length} records for churn analysis!`);
-            } catch (error) {
-                console.error("Error during file processing:", error);
-                showCustomModal(`Error processing data: ${error.message}`);
-            } finally {
-                setLoading(false);
-                setFile(null);
-            }
-        };
-        reader.readAsText(file);
-    };
-
-    return (
-        <div className="bg-white p-6 shadow-xl rounded-xl border border-red-100 mb-8">
-            <h3 className="text-xl font-bold text-gray-900 mb-4 flex items-center"><UserCheck className="w-5 h-5 mr-2 text-red-600"/> Dedicated Churn Data Uploader</h3>
-            <p className="text-gray-600 mb-4">
-                This module requires a specific, structured dataset containing customer churn indicators.
-            </p>
-
-            <div className="mb-6 p-4 bg-red-50 rounded-lg border border-red-200">
-                <h4 className="font-semibold text-red-800 mb-2">MANDATORY CSV Schema:</h4>
-                <code className="block bg-red-100 p-2 rounded text-sm text-red-900 overflow-x-auto">
-                    name,MRR,churnProbability,supportTickets,lastActivityDays,contractLengthMonths
-                </code>
-            </div>
-
-            <div className="flex flex-col sm:flex-row items-center space-y-4 sm:space-y-0 sm:space-x-4">
-                <input type="file" accept=".csv" onChange={handleFileUpload} key={file ? file.name : 'no-file-churn'} className="flex-1 w-full text-sm text-gray-900 border border-gray-300 rounded-lg cursor-pointer bg-gray-50 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-red-50 file:text-red-700"/>
-                <button onClick={handleProcessFile} disabled={!file || loading} className="w-full sm:w-auto px-6 py-2 text-white bg-red-600 hover:bg-red-700 font-medium rounded-lg shadow transition disabled:bg-gray-400">
-                    {loading ? 'Processing...' : 'Load Churn Data'}
-                </button>
-            </div>
-            <div className="mt-4 flex justify-between items-center">
-                {uploadedCount > 0 && (<p className="text-sm font-medium text-green-700">Loaded {uploadedCount} records.</p>)}
-                <button onClick={seedInitialData} className="text-xs text-blue-500 hover:text-blue-700 transition font-medium">Seed Sample Data</button>
-            </div>
-        </div>
-    );
-};
-
-// Subcomponent: MRR Simulation / What-If Prediction
-/** @param {{ enhancedCustomers: EnhancedCustomerData[] }} props */
-const ChurnSimulation = ({ enhancedCustomers }) => {
-    const [whatIfData, setWhatIfData] = useState({
-        discountEffect: 0.1, // Expected churn rate reduction from discount
-        supportEffect: 0.05, // Expected churn rate reduction from proactive support
-        campaignEffect: 0.15, // Expected churn rate reduction from re-engagement campaign
-        selectedRiskLevel: 'High',
-    });
-
-    const simulationResults = useMemo(() => {
-        const { discountEffect, supportEffect, campaignEffect, selectedRiskLevel } = whatIfData;
-    
-        const targetCustomers = enhancedCustomers.filter(c => 
-            selectedRiskLevel === 'All' || c.riskLevel === selectedRiskLevel
-        );
-    
-        const currentTotalMRR = enhancedCustomers.reduce((sum, c) => sum + (c.MRR || 0), 0);
-    
-        // 1. Baseline calculation (Expected MRR loss without intervention)
-        const potentialMRRLoss = targetCustomers.reduce((loss, c) => {
-          const estimatedChurnRate = c.riskScore / 100;
-          return loss + (c.MRR * estimatedChurnRate);
-        }, 0);
-    
-        // 2. Simulated calculation (applying mitigation effects)
-        const simulatedMRRLoss = targetCustomers.reduce((loss, c) => {
-          const estimatedChurnRate = c.riskScore / 100;
-          let reduction = 0;
-          
-          if (c.MRR > 500) reduction += discountEffect;
-          if (c.supportTickets > 3) reduction += supportEffect;
-          if (c.lastActivityDays > 14) reduction += campaignEffect;
-          
-          reduction = Math.min(reduction, 0.95);
-    
-          const newChurnRate = estimatedChurnRate * (1 - reduction);
-          return loss + (c.MRR * newChurnRate);
-        }, 0);
-    
-        const projectedMRRSaved = potentialMRRLoss - simulatedMRRLoss;
-    
-        return {
-          currentTotalMRR,
-          potentialMRRLoss,
-          simulatedMRRLoss,
-          projectedMRRSaved,
-          targetCustomerCount: targetCustomers.length
-        };
-    }, [enhancedCustomers, whatIfData]);
-
-    /** @param {{ title: string, value: string, color: 'red' | 'green' | 'blue' | 'orange', isLarge?: boolean }} props */
-    const ResultBox = ({ title, value, color, isLarge = false }) => {
-        const colorClasses = {
-          red: 'bg-red-50 text-red-700 border-red-300',
-          green: 'bg-green-50 text-green-700 border-green-300',
-          blue: 'bg-blue-50 text-blue-700 border-blue-300',
-          orange: 'bg-yellow-50 text-yellow-700 border-yellow-300',
-        };
-        return (
-          <div className={`p-4 rounded-xl border ${colorClasses[color]} ${isLarge ? 'col-span-1 sm:col-span-2' : ''}`}>
-            <p className={`text-sm font-medium ${isLarge ? 'text-lg' : ''}`}>{title}</p>
-            <p className={`text-3xl font-extrabold ${isLarge ? 'text-4xl my-2' : 'mt-1'}`}>{value}</p>
-          </div>
-        );
-      };
-
-    return (
-        <div className="bg-white p-6 shadow-xl rounded-xl border border-blue-100 mb-8">
-            <h3 className="text-xl font-extrabold text-blue-800 mb-4 flex items-center">
-                <Activity className="w-5 h-5 mr-2 text-blue-500" /> MRR Simulation / What-If Prediction
-            </h3>
-            <p className="text-gray-600 mb-4">Adjust strategy effectiveness to predict potential MRR savings.</p>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                <div>
-                <label className="block text-sm font-medium text-gray-700">Target Risk Level</label>
-                <select
-                    value={whatIfData.selectedRiskLevel}
-                    onChange={(e) => setWhatIfData({ ...whatIfData, selectedRiskLevel: e.target.value })}
-                    className="mt-1 block w-full rounded-lg border-gray-300 shadow-sm p-2 bg-gray-50 focus:ring-blue-500 focus:border-blue-500 transition"
-                >
-                    <option value="All">All Customers</option>
-                    <option value="High">High Risk Only (Score $\ge 70$)</option>
-                    <option value="Medium">Medium Risk Only (Score $40$-$69$)</option>
-                </select>
-                </div>
-            </div>
-
-            <div className="space-y-4">
-                <label className="block text-lg font-semibold text-blue-700 pt-2 border-t mt-4">Retention Strategy Effectiveness (Expected Churn Rate Reduction)</label>
-
-                {['Discount Offer', 'Proactive Support', 'Re-engagement Campaign'].map((label, index) => {
-                const key = index === 0 ? 'discountEffect' : index === 1 ? 'supportEffect' : 'campaignEffect';
-                const effect = whatIfData[key];
-                return (
-                    <div key={key}>
-                    <label className="text-sm font-medium text-gray-700 flex justify-between">
-                        <span>{label}</span>
-                        <span className="font-mono text-blue-600">{Math.round(effect * 100)}%</span>
-                    </label>
-                    <input
-                        type="range"
-                        min="0" max="0.3" step="0.01"
-                        value={effect}
-                        onChange={(e) => setWhatIfData({ ...whatIfData, [key]: parseFloat(e.target.value) })}
-                        className="w-full h-2 bg-blue-100 rounded-lg appearance-none cursor-pointer range-lg focus:outline-none focus:ring-2 focus:ring-blue-500 mt-1"
-                    />
-                    </div>
-                );
-                })}
-            </div>
-
-            <div className="mt-6 border-t border-blue-200 pt-4">
-                <h4 className="text-lg font-bold text-gray-800 mb-3">Simulation Impact:</h4>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-center">
-                <ResultBox title="Potential Loss (No Action)" value={formatCurrency(simulationResults.potentialMRRLoss)} color="red" />
-                <ResultBox title="Projected Loss (With Actions)" value={formatCurrency(simulationResults.simulatedMRRLoss)} color="orange" />
-                <ResultBox title="MRR Projected Saved" value={formatCurrency(simulationResults.projectedMRRSaved)} color="green" isLarge={true} />
-                <ResultBox title="Total Current MRR" value={formatCurrency(simulationResults.currentTotalMRR)} color="blue" />
-                </div>
-                <p className="text-xs text-gray-500 mt-3 text-right">Based on {simulationResults.targetCustomerCount} customer(s) targeted.</p>
-            </div>
-        </div>
-    );
-};
-
-// Subcomponent: High-Risk Customer Tracker
-/** @param {{ enhancedCustomers: EnhancedCustomerData[], handleContactCustomer: (id: string) => void }} props */
-const HighRiskTracker = ({ enhancedCustomers, handleContactCustomer }) => {
-    return (
-        <div className="bg-white p-6 shadow-xl rounded-xl border border-red-100 mb-8">
-            <h3 className="text-xl font-extrabold text-red-800 mb-4 flex items-center">
-                <TrendingDown className="w-5 h-5 mr-2 text-red-500"/> High-Risk Customer Tracker
-            </h3>
-            <p className="text-gray-600 mb-4">
-                Ranks customers with a churn risk score of **40 or higher** (Medium/High).
-            </p>
-            <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-gray-200">
-                    <thead className="bg-gray-50">
-                        <tr>
-                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Customer</th>
-                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">MRR</th>
-                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Risk Score</th>
-                            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Tickets</th>
-                            <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
-                        </tr>
-                    </thead>
-                    <tbody className="bg-white divide-y divide-gray-200">
-                    {enhancedCustomers.filter(c => c.riskLevel !== 'Low').map((c) => {
-                        const rowClass = c.riskLevel === 'High' ? 'bg-red-50 hover:bg-red-100 transition' : 'bg-yellow-50 hover:bg-yellow-100 transition';
-
-                        return (
-                        <tr key={c.id} className={rowClass}>
-                            <td className="px-4 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                            {c.name}
-                            <span className={`ml-2 inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${c.riskLevel === 'High' ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800'}`}>
-                                {c.riskLevel}
-                            </span>
-                            </td>
-                            <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-500">{formatCurrency(c.MRR)}</td>
-                            <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-500">
-                                <div className="w-20 bg-gray-200 rounded-full h-2.5">
-                                    <div
-                                    className={`h-2.5 rounded-full ${c.riskScore >= 70 ? 'bg-red-600' : 'bg-yellow-500'}`}
-                                    style={{ width: `${c.riskScore.toFixed(0)}%` }}
-                                    title={`${c.riskScore.toFixed(0)}%`}
-                                    ></div>
-                                </div>
-                            </td>
-                            <td className="px-4 py-4 whitespace-nowrap text-sm text-gray-500">{c.supportTickets}</td>
-                            <td className="px-4 py-4 whitespace-nowrap text-right text-sm font-medium">
-                            {c.isContacted ? (
-                                <span className="inline-flex items-center px-3 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                                <UserCheck className="w-3 h-3 mr-1" /> Contacted
-                                </span>
-                            ) : (
-                                <button
-                                onClick={() => handleContactCustomer(c.id)}
-                                className="text-white bg-red-500 hover:bg-red-600 focus:ring-4 focus:ring-red-300 font-medium rounded-lg text-xs px-3 py-1.5 transition shadow"
-                                >
-                                Mark Contacted
-                                </button>
-                            )}
-                            </td>
-                        </tr>
-                        );
-                    })}
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    );
-};
-
-// Subcomponent: Expanded Churn Analysis (New Section)
-/** @param {{ calculateChurnRisk: (days: number, tickets: number, features: number) => number }} props */
-const ExpandedChurnAnalysis = ({ calculateChurnRisk }) => {
-    // --- State for Predictive Model Test ---
-    const [daysSinceLogin, setDaysSinceLogin] = useState(15);
-    const [supportTickets, setSupportTickets] = useState(3);
-    const [featuresUsed, setFeaturesUsed] = useState(5);
-    const [predictedChurnRisk, setPredictedChurnRisk] = useState(0);
-
-    const mockChurnDrivers = [
-        { driver: 'Poor Onboarding Experience', impactPercentage: 35, priority: 'High' },
-        { driver: 'High Pricing Perceived Value', impactPercentage: 25, priority: 'High' },
-        { driver: 'Lack of Key Feature X', impactPercentage: 18, priority: 'Medium' },
-    ];
-
-    useEffect(() => {
-        const newRisk = calculateChurnRisk(daysSinceLogin, supportTickets, featuresUsed);
-        setPredictedChurnRisk(newRisk);
-    }, [daysSinceLogin, supportTickets, featuresUsed, calculateChurnRisk]);
-
-    const renderChurnRiskGauge = (risk) => {
-        let color = 'text-green-500';
-        let message = 'Low Risk';
-        if (risk > 50) { color = 'text-yellow-500'; message = 'Moderate Risk'; }
-        if (risk > 75) { color = 'text-red-500'; message = 'High Risk - Intervention Needed'; }
-    
-        return (
-          <div className="flex flex-col items-center mt-4">
-            <div className="w-32 h-16 relative overflow-hidden">
-              <svg viewBox="0 0 100 50" className="w-full h-full">
-                <path d="M 10 40 A 40 40 0 0 1 90 40" fill="none" stroke="#e5e7eb" strokeWidth="10" />
-                <path
-                  d="M 10 40 A 40 40 0 0 1 90 40"
-                  fill="none"
-                  stroke={risk > 75 ? '#ef4444' : risk > 50 ? '#f59e0b' : '#10b981'}
-                  strokeWidth="10"
-                  strokeDasharray={`${(risk / 100) * 125.66} 125.66`}
-                />
-              </svg>
-              <div className="absolute inset-x-0 bottom-0 text-center -mt-2">
-                <p className={`text-xl font-bold ${color}`}>{risk}%</p>
-              </div>
-            </div>
-            <p className={`mt-2 font-medium ${color}`}>{message}</p>
-          </div>
-        );
-    };
-
-    return (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-
-            {/* Predictive Churn Score Input */}
-            <div className="lg:col-span-1 bg-white p-6 rounded-xl shadow-lg border border-pink-100">
-                <h3 className="text-xl font-bold text-gray-800 mb-4">Predictive Model Test</h3>
-                <p className="text-sm text-gray-600 mb-4">Input user activity metrics to estimate churn risk score instantly.</p>
-                
-                <div className="space-y-4">
-                    {/* Days Since Last Login */}
-                    <div>
-                        <label htmlFor="daysLogin" className="block text-sm font-medium text-gray-700">Days Since Last Login ({daysSinceLogin})</label>
-                        <input id="daysLogin" type="range" min="1" max="60" value={daysSinceLogin} onChange={(e) => setDaysSinceLogin(parseInt(e.target.value))} className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"/>
-                    </div>
-                    {/* Support Tickets */}
-                    <div>
-                        <label htmlFor="tickets" className="block text-sm font-medium text-gray-700">Open Support Tickets ({supportTickets})</label>
-                        <input id="tickets" type="range" min="0" max="10" value={supportTickets} onChange={(e) => setSupportTickets(parseInt(e.target.value))} className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"/>
-                    </div>
-                    {/* Features Used */}
-                    <div>
-                        <label htmlFor="features" className="block text-sm font-medium text-gray-700">Core Features Used Monthly ({featuresUsed})</label>
-                        <input id="features" type="range" min="1" max="10" value={featuresUsed} onChange={(e) => setFeaturesUsed(parseInt(e.target.value))} className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"/>
-                    </div>
-                </div>
-                
-                <div className="mt-6 border-t pt-4">
-                    <p className="text-sm font-semibold text-gray-500">Predicted Churn Risk:</p>
-                    {renderChurnRiskGauge(predictedChurnRisk)}
-                </div>
-            </div>
-            
-            {/* Retention Strategy Prioritizer */}
-            <div className="lg:col-span-2 bg-white p-6 rounded-xl shadow-lg border border-pink-100">
-                <h3 className="text-xl font-bold text-gray-800 mb-4">Retention Strategy Prioritizer (ROI)</h3>
-                <p className="text-sm text-gray-600 mb-4">Analyze the potential return on investment (ROI) for targeted retention campaigns by driver.</p>
-
-                <div className="space-y-4">
-                    {mockChurnDrivers.map((driver, index) => {
-                        const retentionImpact = driver.impactPercentage * 0.4 * (driver.priority === 'High' ? 1.5 : 1);
-                        const roiPercentage = retentionImpact * 5; 
-
-                        return (
-                        <div key={index} className="flex items-center space-x-4 p-3 bg-gray-50 rounded-lg">
-                            <div className="flex-shrink-0 w-12 h-12 flex items-center justify-center bg-pink-100 text-pink-600 rounded-full">
-                                <BarChart className="w-6 h-6" />
-                            </div>
-                            <div className="flex-grow">
-                                <p className="font-semibold text-gray-800">{driver.driver}</p>
-                                <p className="text-sm text-gray-500">Targeted Campaign Potential: Reduce churn by ~<span className="font-bold text-pink-600">{retentionImpact.toFixed(1)}%</span></p>
-                            </div>
-                            <div className="text-right">
-                                <p className="text-xs text-gray-500">Est. ROI</p>
-                                <p className="text-xl font-bold text-green-600">{roiPercentage.toFixed(0)}%</p>
-                            </div>
-                        </div>
-                        );
-                    })}
-                </div>
-                <p className="mt-6 text-sm text-gray-500">
-                    <span className="font-bold">Recommendation:</span> High ROI indicates highly impactful and cost-effective campaigns.
-                </p>
-            </div>
-        </div>
-    );
-}
-
-// --- 5. Churn Predictor Component (The main container for all churn features) ---
-/** @param {{ customerData: CustomerData[], setCustomerData: (data: CustomerData[]) => void, handleContactCustomer: (id: string) => void, seedInitialData: () => void, showCustomModal: (msg: string) => void }} props */
-const ChurnPredictor = ({ customerData, setCustomerData, handleContactCustomer, seedInitialData, showCustomModal }) => {
-    
-    // Logic from the second turn to calculate mock risk based on three factors.
-    const calculateCustomChurnRisk = useCallback((days, tickets, features) => {
-        const risk = Math.round(Math.max(0, (days / 10) * 0.3 + (tickets * 8) * 0.5 - (features * 4) * 0.2 + 15));
-        return Math.min(100, risk);
-    }, []);
-
-    // Calculate enhanced customer list
-    const enhancedCustomers = useMemo(() => {
-        return customerData.map(c => {
-            const riskScore = calculateChurnRiskScore(c);
-            const riskLevel = riskScore >= 70 ? 'High' : riskScore >= 40 ? 'Medium' : 'Low';
-            return { ...c, riskScore, riskLevel };
-        }).sort((a, b) => b.riskScore - a.riskScore); // Sort by highest risk
-    }, [customerData]);
-
-
-    if (customerData.length === 0) {
-        return (
-            <div className="p-4 md:p-8">
-                <h2 className="text-3xl font-bold text-gray-900 mb-6 border-b pb-2 flex items-center"><TrendingDown className="w-6 h-6 mr-2 text-red-600"/> Churn Predictor</h2>
-                <ChurnDataUploader onDataUpload={setCustomerData} showCustomModal={showCustomModal} seedInitialData={seedInitialData} />
-                <NoDataMessage viewName="Churn Predictor" isSpecific={true} />
-            </div>
-        );
-    }
-    
-    return (
-        <div className="p-4 md:p-8">
-            <h2 className="text-3xl font-bold text-gray-900 mb-6 border-b pb-2 flex items-center"><TrendingDown className="w-6 h-6 mr-2 text-red-600"/> Churn Predictor: Advanced Analysis</h2>
-            <div className="text-sm text-gray-600 mb-6 p-4 bg-yellow-50 rounded-lg border border-yellow-200">
-                <p>Metrics generated from **{customerData.length} records** loaded specifically for churn analysis. Risk scores are automatically calculated.</p>
-            </div>
-            
-            {/* 1. MRR Simulation / What-If Prediction */}
-            <ChurnSimulation enhancedCustomers={enhancedCustomers} />
-
-            {/* 2. High-Risk Customer Tracker */}
-            <HighRiskTracker 
-                enhancedCustomers={enhancedCustomers} 
-                handleContactCustomer={handleContactCustomer} 
-            />
-
-            {/* 3. Expanded Churn Analysis (New Section) */}
-            <h3 className="text-2xl font-extrabold text-gray-800 mt-10 mb-6 border-b pb-2 flex items-center">
-                <Zap className="w-6 h-6 mr-2 text-pink-600" /> Expanded Churn Analysis & Prevention
-            </h3>
-            <ExpandedChurnAnalysis calculateChurnRisk={calculateCustomChurnRisk} />
-        </div>
-    );
-};
-
-  const seedInitialData = useCallback(() => {
-    /** @type {CustomerData[]} */
-    const dummyCustomers = [
-      { id: 'd1', name: 'Acme Corp', MRR: 1500, churnProbability: 0.85, supportTickets: 8, lastActivityDays: 45, contractLengthMonths: 12, isContacted: false },
-      { id: 'd2', name: 'Beta Solutions', MRR: 300, churnProbability: 0.30, supportTickets: 1, lastActivityDays: 5, contractLengthMonths: 6, isContacted: false },
-      { id: 'd3', name: 'Gamma Innovations', MRR: 800, churnProbability: 0.65, supportTickets: 4, lastActivityDays: 20, contractLengthMonths: 18, isContacted: false },
-      { id: 'd4', name: 'Delta Analytics', MRR: 200, churnProbability: 0.95, supportTickets: 10, lastActivityDays: 70, contractLengthMonths: 3, isContacted: false },
-      { id: 'd5', name: 'Epsilon Tech', MRR: 1200, churnProbability: 0.20, supportTickets: 0, lastActivityDays: 1, contractLengthMonths: 24, isContacted: false },
-    ];
-    setCustomerData(dummyCustomers);
-    showCustomModal(`Successfully added ${dummyCustomers.length} initial customers to the Churn Predictor!`);
-  }, [setCustomerData, showCustomModal]);
-
-  const handleContactCustomer = useCallback((customerId) => {
-    setCustomerData(prevCustomers => 
-        prevCustomers.map(c => 
-            c.id === customerId ? { ...c, isContacted: true } : c
-        )
-    );
-    showCustomModal("Customer marked as contacted! (Local update)");
-  }, [setCustomerData, showCustomModal]);
   
 
-const SettingsPanel = () => (
-    <SectionCard title="Application Settings">
-      <p className="text-gray-600">Manage user profile, API keys, data source connections, and notification preferences here. (Functionality preserved as placeholder).</p>
-      <div className="mt-4 space-y-3">
-        <div className="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
-          <span className="text-gray-700">Dark Mode</span>
-          <input type="checkbox" className="toggle toggle-primary" />
+// --- View Components ---
+
+// Component 1: Data Dashboard (The main hub, includes data upload)
+const DataDashboard = ({ onDataUpload, showCustomModal, seedInitialData, showToast = null }) => {
+  const [file, setFile] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [uploadedCount, setUploadedCount] = useState(0);
+  const [previewHeaders, setPreviewHeaders] = useState([]);
+  const [previewRows, setPreviewRows] = useState([]);
+  const [showMalformed, setShowMalformed] = useState(false);
+  // Persisted header mapping (loads from localStorage if present)
+  const HEADER_MAPPING_KEY = 'jarvis_header_mapping_v1';
+  const defaultMapping = { dateKey: null, mrrKey: 'MRR', idKey: 'id', churnKey: null, supportKey: null, lastActivityKey: null };
+  const [mapping, setMapping] = useState(() => {
+    try {
+      const raw = localStorage.getItem(HEADER_MAPPING_KEY);
+      if (raw) return { ...defaultMapping, ...JSON.parse(raw) };
+    } catch (e) { /* ignore */ }
+    return defaultMapping;
+  });
+
+  // save mapping to localStorage when it changes
+  useEffect(() => {
+    try { localStorage.setItem(HEADER_MAPPING_KEY, JSON.stringify(mapping)); } catch (e) { /* ignore */ }
+  }, [mapping]);
+
+  // expected headers kept for reference if needed later
+
+  // parseCSV moved to ./utils/csv.js
+
+
+  const handleFileUpload = (e) => {
+    const uploadedFile = e.target.files[0];
+  if (uploadedFile && uploadedFile.name.endsWith('.csv')) {
+      setFile(uploadedFile);
+      setUploadedCount(0);
+      // read header preview
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const text = ev.target.result || '';
+        const firstLine = text.split('\n')[0] || '';
+        const headers = firstLine.split(',').map(h => h.trim());
+        setPreviewHeaders(headers);
+        // parse preview rows (first 10) quickly
+        try {
+          const lines = text.split('\n').slice(1, 11);
+          const previews = lines.map(l => {
+            const cols = l.split(',');
+            const obj = {};
+            headers.forEach((h, idx) => { obj[h] = cols[idx] !== undefined ? cols[idx].trim() : ''; });
+            return obj;
+          }).filter(r => Object.keys(r).length > 0);
+          setPreviewRows(previews);
+        } catch (e) { setPreviewRows([]); }
+        // set sensible defaults
+        setMapping({ dateKey: headers.find(h => /date|month|created_at|uploadedat/i.test(h)) || null, mrrKey: headers.find(h => /mrr|revenue|amount|value/i.test(h)) || 'MRR', idKey: headers.find(h => /id|name|customer/i.test(h)) || 'id' });
+      };
+      reader.readAsText(uploadedFile);
+    } else {
+      setFile(null);
+      (showToast || showCustomModal)("Please upload a valid CSV file.", 'error');
+    }
+  };
+
+  // Detect malformed uploads (missing date or MRR-like columns)
+  useEffect(() => {
+    try {
+      // only evaluate after we have detected headers (i.e., after a file preview)
+      if (!previewHeaders || previewHeaders.length === 0) {
+        setShowMalformed(false);
+        return;
+      }
+      const dateCandidate = mapping.dateKey || previewHeaders.find(h => /date|month|created_at|uploadedat|start_date|signupDate/i.test(h));
+      const mrrCandidate = mapping.mrrKey || previewHeaders.find(h => /mrr|revenue|amount|value/i.test(h));
+      setShowMalformed(!(dateCandidate && mrrCandidate));
+    } catch (e) { setShowMalformed(false); }
+  }, [previewHeaders, mapping]);
+
+  const handleProcessFile = async () => {
+    if (!file) {
+      (showToast || showCustomModal)("No valid file selected.", 'error');
+      return;
+    }
+    setUploadedCount(0);
+    const reader = new FileReader();
+
+    reader.onload = async (event) => {
+      try {
+        const csvText = event.target.result;
+        const customerData = parseCSV(csvText, mapping);
+
+        if (customerData.length === 0) {
+          (showToast || showCustomModal)("Could not parse any valid data from the CSV. Please check the format.", 'error');
+          setLoading(false);
+          return;
+        }
+
+        onDataUpload(customerData, mapping);
+
+        // If authenticated, try to upload to server for persistence
+        try {
+          const meUser = await auth.me();
+          if (meUser && file) {
+            const form = new FormData();
+            form.append('file', file, file.name);
+            const resp = await auth.apiFetch('/api/uploads/', { method: 'POST', body: form });
+            if (resp.ok) {
+              (showToast || showCustomModal)(`Uploaded ${customerData.length} rows to server.`, 'success');
+            } else {
+              console.warn('Server upload failed', resp.status);
+              (showToast || showCustomModal)(`Local load succeeded; server upload failed (${resp.status}).`, 'warn');
+            }
+          }
+        } catch (e) {
+          console.error('Upload to server failed', e);
+          (showToast || showCustomModal)('Local load succeeded; server upload error. See console.', 'warn');
+        }
+
+        setUploadedCount(customerData.length);
+        (showToast || showCustomModal)(`Successfully loaded ${customerData.length} new customer records into memory!`, 'success');
+      } catch (error) {
+        console.error("Error during file processing:", error);
+        (showToast || showCustomModal)(`Error processing data: ${error.message}`, 'error');
+      } finally {
+        setLoading(false);
+        setFile(null);
+        setPreviewRows([]);
+      }
+    };
+
+    reader.onerror = (error) => {
+      console.error("File read error:", error);
+      (showToast || showCustomModal)("Failed to read the file.", 'error');
+      setLoading(false);
+    };
+
+    reader.readAsText(file);
+  };
+
+  // Mapping preview UI helpers
+  const HeaderSelector = ({ label, value, onChange }) => (
+    <div>
+      <label className="block text-sm font-medium text-gray-700">{label}</label>
+      <select value={value || ''} onChange={(e) => onChange(e.target.value)} className="mt-1 block w-full rounded-lg border-gray-300 shadow-sm p-2 bg-white">
+        <option value="">(none)</option>
+        {previewHeaders.map(h => <option key={h} value={h}>{h}</option>)}
+      </select>
+    </div>
+  );
+
+  return (
+    <div className="p-4 md:p-8">
+      <h2 className="text-3xl font-bold text-gray-900 mb-6 border-b pb-2">Data Intake & Preparation</h2>
+
+      <div className="bg-white p-6 shadow-xl rounded-xl border border-gray-100">
+        <p className="text-gray-700 mb-4">
+            Upload a **CSV file** to populate the customer data. Data is stored **only in your browser's memory** and is not persistent.
+        </p>
+
+        <div className="mb-6 p-4 bg-blue-50 rounded-lg border border-blue-200">
+          <h4 className="font-semibold text-blue-800 mb-2">Required CSV Format (Headers):</h4>
+          <p className="text-sm text-blue-800 mb-2">At minimum include a Date column and an MRR (revenue) column. Common header names:</p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <div>
+              <div className="text-xs text-blue-700 font-semibold">Date aliases</div>
+              <code className="block bg-blue-100 p-2 rounded text-sm text-blue-900 overflow-x-auto">date, month, created_at, createdAt, uploadedAt, start_date, signupDate</code>
+            </div>
+            <div>
+              <div className="text-xs text-blue-700 font-semibold">MRR / Revenue aliases</div>
+              <code className="block bg-blue-100 p-2 rounded text-sm text-blue-900 overflow-x-auto">MRR, revenue, amount, value, price, monthly_revenue</code>
+            </div>
+          </div>
+          <div className="mt-3 text-sm text-blue-700">Other helpful columns: <code className="bg-blue-100 p-1 rounded">name</code>, <code className="bg-blue-100 p-1 rounded">churnProbability</code>, <code className="bg-blue-100 p-1 rounded">supportTickets</code></div>
+          <div className="mt-2 text-xs text-blue-600">
+            Churn formats accepted: decimal probability (e.g., <code className="bg-blue-50 p-1 rounded">0.12</code>) or percent (e.g., <code className="bg-blue-50 p-1 rounded">12%</code>). The parser normalizes percent values to 0–1. Empty churn values will be set to 0 and can be estimated by the Churn Predictor if you enable the heuristic.
+          </div>
         </div>
-        <div className="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
-          <span className="text-gray-700">Data Auto-Refresh</span>
-          <input type="checkbox" defaultChecked className="toggle toggle-primary" />
+
+        <div className="flex flex-col sm:flex-row items-center space-y-4 sm:space-y-0 sm:space-x-4">
+          <input
+            type="file"
+            accept=".csv"
+            onChange={handleFileUpload}
+            className="flex-1 w-full text-sm text-gray-900 border border-gray-300 rounded-lg cursor-pointer bg-gray-50 focus:outline-none file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700"
+          />
         </div>
-        <button className="w-full px-4 py-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600 transition-colors">Update Preferences</button>
+
+        {showMalformed && (
+          <div className="mt-4 p-3 rounded bg-red-50 border border-red-100 text-red-700 text-sm">
+            Warning: uploaded CSV does not appear to contain a recognizable Date, Name and/or MRR column. Please verify your headers or adjust the column selectors below.
+          </div>
+        )}
+        {previewHeaders.length > 0 && (
+          <>
+            {/* Suggested header picks (moved above preview) */}
+            <div className="mt-3 p-3 bg-yellow-50 rounded border border-yellow-100 text-sm">
+              {(() => {
+                    const suggestedDate = previewHeaders.find(h => /date|month|created_at|createdAt|uploadedAt|start_date|signupDate/i.test(h));
+                    const suggestedMrr = previewHeaders.find(h => /mrr|revenue|amount|value|price|monthly_revenue/i.test(h));
+                    const suggestedChurn = previewHeaders.find(h => /churn|churnProbability|churn_prob|churn_rate|churn%/i.test(h));
+                    const suggestedSupport = previewHeaders.find(h => /support|ticket|tickets|open_tickets|num_tickets/i.test(h));
+                    const suggestedLastActivity = previewHeaders.find(h => /lastActivity|last_activity|last_login|days_ago|days_inactive|inactive_days|lastSeen|last_seen/i.test(h));
+                    return (
+                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between">
+                        <div className="mb-2 sm:mb-0">
+                          <div><strong>Suggested Date:</strong> {suggestedDate || <span className="text-gray-500">(none detected)</span>}</div>
+                          <div><strong>Suggested MRR:</strong> {suggestedMrr ? suggestedMrr : <span className="text-gray-500">(none detected)</span>}</div>
+                          <div><strong>Suggested Churn:</strong> {suggestedChurn || <span className="text-gray-500">(none detected)</span>}</div>
+                          <div><strong>Suggested Support Tickets:</strong> {suggestedSupport || <span className="text-gray-500">(none detected)</span>}</div>
+                          <div><strong>Suggested Last Activity:</strong> {suggestedLastActivity || <span className="text-gray-500">(none detected)</span>}</div>
+                        </div>
+                        <div className="flex items-center space-x-2">
+                          <button className="px-3 py-1 bg-green-600 text-white rounded text-sm" onClick={() => {
+                            // accept suggestions into mapping if present
+                            setMapping(prev => ({ ...prev, dateKey: suggestedDate || prev.dateKey, mrrKey: suggestedMrr || prev.mrrKey, churnKey: suggestedChurn || prev.churnKey, supportKey: suggestedSupport || prev.supportKey, lastActivityKey: suggestedLastActivity || prev.lastActivityKey }));
+                            (showToast || showCustomModal)('Suggested header mapping applied.', 'success');
+                          }}>Accept Suggestions</button>
+                          <button className="px-3 py-1 bg-gray-100 rounded text-sm" onClick={() => { setMapping({ dateKey: null, mrrKey: 'MRR', idKey: 'id', churnKey: null, supportKey: null, lastActivityKey: null }); (showToast || showCustomModal)('Reset header mapping.', 'info'); }}>Reset</button>
+                        </div>
+                      </div>
+                    );
+                  })()}
+            </div>
+
+            <div className="mt-4 grid grid-cols-1 sm:grid-cols-4 gap-4">
+              <HeaderSelector label="Date Column" value={mapping.dateKey} onChange={(v) => setMapping(prev => ({ ...prev, dateKey: v }))} />
+              <HeaderSelector label="MRR Column" value={mapping.mrrKey} onChange={(v) => setMapping(prev => ({ ...prev, mrrKey: v }))} />
+              <HeaderSelector label="Churn Column" value={mapping.churnKey} onChange={(v) => setMapping(prev => ({ ...prev, churnKey: v }))} />
+              <HeaderSelector label="Support Tickets Column" value={mapping.supportKey} onChange={(v) => setMapping(prev => ({ ...prev, supportKey: v }))} />
+              <HeaderSelector label="Last Activity Column" value={mapping.lastActivityKey} onChange={(v) => setMapping(prev => ({ ...prev, lastActivityKey: v }))} />
+              <HeaderSelector label="ID / Name Column" value={mapping.idKey} onChange={(v) => setMapping(prev => ({ ...prev, idKey: v }))} />
+            </div>
+          </>
+        )}
+
+        {/* Preview rows only */}
+            <div className="mt-6">
+          <div className="bg-white p-4 rounded border overflow-x-auto">
+            <h4 className="font-semibold text-gray-700 mb-2">Preview Rows</h4>
+            {previewRows.length === 0 ? (
+              <div className="text-xs text-gray-500">No preview available.</div>
+            ) : (
+              <div style={{ minWidth: Math.max(previewHeaders.length * 140, 600) }}>
+                <table className="w-full text-sm table-auto whitespace-nowrap">
+                  <thead>
+                    <tr>
+                          {previewHeaders.map(h => (
+                                      <th key={h} className={`text-left pr-4 font-medium text-gray-600`}>{h}</th>
+                                    ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {previewRows.map((r, idx) => (
+                          <tr key={idx} className="border-t">
+                        {previewHeaders.map(h => <td key={h} className="py-1 pr-4">{r[h]}</td>)}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+        
+        <div className="mt-4 flex justify-between items-center">
+            <div className="flex items-center space-x-3">
+              <button
+                onClick={handleProcessFile}
+                disabled={!file || loading}
+                className="px-4 py-2 text-white bg-green-600 hover:bg-green-700 rounded shadow disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {loading ? 'Processing...' : `Process File ${file ? `(${file.name})` : ''}`}
+              </button>
+              {uploadedCount > 0 && (
+                <p className="text-sm font-medium text-green-700">Loaded {uploadedCount} records.</p>
+              )}
+            </div>
+      <button id="load-demo-btn"
+        type="button"
+        aria-label="Load demo dataset"
+        onClick={async () => {
+          setLoading(true);
+          try {
+            const resp = await fetch('/demo_sample.csv');
+            const txt = await resp.text();
+            const parsed = parseCSV(txt, { dateKey: 'date', mrrKey: 'MRR', idKey: 'name' });
+            if (parsed && parsed.length) {
+              onDataUpload(parsed, { dateKey: 'date', mrrKey: 'MRR', idKey: 'name' });
+              setUploadedCount(parsed.length);
+              (showToast || showCustomModal)(`Loaded demo dataset (${parsed.length} rows)`, 'success');
+            } else {
+              (showToast || showCustomModal)('Demo data failed to parse.', 'error');
+            }
+          } catch (e) {
+            console.error('Load demo failed', e);
+            // Fallback for test environments (jsdom/no network): seed local dummy data instead
+            try {
+              seedInitialData();
+              (showToast || showCustomModal)('Loaded demo dataset (fallback seed).', 'info');
+            } catch (se) {
+              console.error('Fallback seed failed', se);
+              (showToast || showCustomModal)('Failed to load demo data.', 'error');
+            }
+          } finally { setLoading(false); }
+        }}
+        className="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 transition"
+      >
+        Load Demo
+      </button>
+        </div>
       </div>
-    </SectionCard>
+      
+      <div className="mt-10 p-6 bg-yellow-50 rounded-xl border border-yellow-200 text-gray-700">
+          <h3 className="font-semibold text-lg text-yellow-800 mb-2">Welcome to the SaaS Analytics Suite!</h3>
+          <p>
+              Use the tabs above to navigate the different modules: view your **Data Overview**, predict churn in the **Churn Predictor**, or run scenarios in the **What-If Simulation**.
+          </p>
+      </div>
+    </div>
+  );
+};
+
+// Small AuthPanel to register/login/logout
+const AuthPanel = ({ showToast = null }) => {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [orgName, setOrgName] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [meUser, setMeUser] = useState(null);
+
+  const refreshMe = useCallback(async () => {
+    const u = await auth.me();
+    setMeUser(u ? u.username : null);
+  }, []);
+
+  useEffect(() => { refreshMe(); }, [refreshMe]);
+
+  const doRegister = async () => {
+    setLoading(true); setError(null);
+    try {
+      await auth.register({ username, password, org_name: orgName || username, set_cookie: true });
+      (showToast || (()=>{}))('Registration successful — logged in (cookie set).', 'success');
+      setUsername(''); setPassword(''); setOrgName('');
+      await refreshMe();
+    } catch (e) {
+      console.error('Register failed', e);
+      setError('Registration failed.');
+    } finally { setLoading(false); }
+  };
+
+  const doLogin = async () => {
+    setLoading(true); setError(null);
+    try {
+      await auth.login({ username, password, use_cookie: true });
+      (showToast || (()=>{}))('Login successful.', 'success');
+      setUsername(''); setPassword('');
+      await refreshMe();
+    } catch (e) {
+      console.error('Login failed', e);
+      setError('Login failed. Check credentials.');
+    } finally { setLoading(false); }
+  };
+
+  const doLogout = async () => {
+    await auth.logout();
+    (showToast || (()=>{}))('Logged out.', 'info');
+    setMeUser(null);
+  };
+
+  if (meUser) {
+    return (
+      <div className="flex items-center space-x-2">
+        <div className="text-xs text-gray-600">{meUser ? `Signed in as ${meUser}` : `Signed in`}</div>
+        <button className="px-3 py-1 text-xs bg-red-100 text-red-700 rounded" onClick={doLogout}>Logout</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center space-x-2">
+      <input placeholder="org (for register)" value={orgName} onChange={(e) => setOrgName(e.target.value)} className="text-xs p-1 rounded border" />
+      <input placeholder="username" value={username} onChange={(e) => setUsername(e.target.value)} className="text-xs p-1 rounded border" />
+      <input placeholder="password" value={password} onChange={(e) => setPassword(e.target.value)} type="password" className="text-xs p-1 rounded border" />
+      <button className="px-3 py-1 bg-green-600 text-white rounded text-xs" disabled={loading} onClick={doLogin}>Login</button>
+      <button className="px-3 py-1 bg-blue-600 text-white rounded text-xs" disabled={loading} onClick={doRegister}>Register</button>
+      {error && <div className="text-xs text-red-600">{error}</div>}
+    </div>
+  );
+};
+
+// Use computeMonthlySeries from utilities
+const computeMonthlySeries = computeMonthlySeriesUtil;
+
+
+// Component 2: Data Overview
+const DataOverview = ({ overviewData }) => {
+    const StatCard = ({ title, value, description }) => (
+        <div className="bg-white p-5 rounded-xl shadow-md border border-gray-200">
+          <p className="text-sm font-medium text-gray-500 truncate">{title}</p>
+          <p className="mt-1 text-3xl font-extrabold text-gray-900">{value}</p>
+          <p className="mt-2 text-xs text-gray-500">{description}</p>
+        </div>
+      );
+
+    return (
+      <div className="p-4 md:p-8">
+  <h2 className="text-3xl font-bold text-gray-900 mb-6 border-b pb-2">Overview — Key Metrics</h2>
+  
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+          <StatCard title="Total Customers" value={overviewData?.customerCount || 'N/A'} description="Current customer count loaded." />
+          <StatCard title="Total Monthly Revenue" value={formatCurrency(overviewData?.totalMRR || 0)} description="Sum of all customers' MRR." />
+          <StatCard title="Average MRR" value={formatCurrency(overviewData?.avgMrr || 0)} description="Monthly Recurring Revenue per customer." />
+          <StatCard title="Est. Annual Revenue" value={formatCurrency(overviewData?.totalRevenue || 0)} description="Total MRR multiplied by 12." />
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 mt-6">
+          <StatCard title="Churned MRR (est)" value={formatCurrency(overviewData?.churnedMRR || 0)} description="Heuristic of at-risk monthly MRR." />
+          <StatCard title="Estimated NRR" value={`${Math.round((overviewData?.estimatedNRR || 1) * 100)}%`} description="Net Revenue Retention (approx)." />
+          <StatCard title="Churn % (by count)" value={`${Math.round((overviewData?.churnRateByCount || 0) * 100)}%`} description="Percent of customers flagged as at-risk." />
+        </div>
+        <div className="mt-8 p-6 bg-white shadow-xl rounded-xl border border-gray-100">
+          <h3 className="text-xl font-bold text-gray-800 mb-4">Core Metrics Chart</h3>
+          <p className="text-gray-600">New vs Expansion vs Churn (monthly) — simple stacked view.</p>
+          {overviewData?.monthlySeries && overviewData.monthlySeries.length > 0 ? (
+            <ChurnChart data={overviewData.monthlySeries} />
+          ) : (
+            <div className="h-48 bg-gray-50 border border-dashed border-gray-300 rounded-lg mt-4 flex items-center justify-center text-gray-400">
+              [Chart Placeholder: Visualizing Loaded Customer Data Distributions]
+            </div>
+          )}
+        </div>
+      </div>
+    );
+};
+
+// Component 3: Time-Series Forecast (Recharts-based)
+const TimeSeriesForecast = ({ chartRef, monthlySeries = [], records = [], showCustomModal = () => {}, showToast = null, showToastRef = { current: null }, showCustomModalRef = { current: null } }) => {
+  const [monthsOut, setMonthsOut] = useState(12);
+  const [method, setMethod] = useState('linear'); // 'linear' or 'holt'
+  // Holt smoothing parameters (persisted in localStorage)
+  const HOLTPREF = 'jarvis_holt_prefs_v1';
+  const storedHolt = (() => { try { return JSON.parse(localStorage.getItem(HOLTPREF) || '{}'); } catch (e) { return {}; } })();
+  const [holtAlpha, setHoltAlpha] = useState(storedHolt.alpha || 0.6);
+  const [holtBeta, setHoltBeta] = useState(storedHolt.beta || 0.2);
+  const [holtBootstrap, setHoltBootstrap] = useState(storedHolt.bootstrap || false);
+  const [holtBootstrapSamples, setHoltBootstrapSamples] = useState(storedHolt.bootstrapSamples || 200);
+  const [holtBootstrapAsync, setHoltBootstrapAsync] = useState(storedHolt.bootstrapAsync || false);
+  const [tuning, setTuning] = useState(false);
+
+  // Prepare numeric series from monthlySeries: [{period: 'YYYY-MM', total}]
+  const series = useMemo(() => {
+    if (!monthlySeries || !Array.isArray(monthlySeries) || monthlySeries.length === 0) return [];
+    // Ensure sorted by period
+    const parsed = monthlySeries.map((m) => ({ period: m.period, total: Number(m.total || 0) }));
+    parsed.sort((a, b) => a.period.localeCompare(b.period));
+    return parsed;
+  }, [monthlySeries]);
+
+  // forecastResult is computed via an async-aware flow below (forecastResultState)
+
+  const [forecastResultState, setForecastResultState] = useState(null);
+
+  const combined = useMemo(() => {
+    if (!series) return [];
+    const actual = series.map(s => ({ period: s.period, actual: s.total }));
+    const fc = (forecastResultState || {}).forecast || [];
+    // merge by period to single objects Recharts likes
+    const map = {};
+    actual.forEach(a => { map[a.period] = map[a.period] || {}; map[a.period].period = a.period; map[a.period].actual = a.actual; });
+    fc.forEach(f => { map[f.period] = map[f.period] || {}; map[f.period].period = f.period; map[f.period].predicted = f.predicted; map[f.period].lower = f.lower; map[f.period].upper = f.upper; });
+    return Object.keys(map).sort().map(k => map[k]);
+  }, [series, forecastResultState]);
+
+  const downloadCSV = () => {
+    const rows = [];
+    // header
+    rows.push(['period','actual','predicted','lower','upper'].join(','));
+    // merge actuals and forecasts by period
+    const map = {};
+    series.forEach(s => { map[s.period] = map[s.period] || {}; map[s.period].actual = s.total; });
+  (forecastResultState?.forecast || []).forEach(f => { map[f.period] = map[f.period] || {}; map[f.period].predicted = f.predicted; map[f.period].lower = f.lower; map[f.period].upper = f.upper; });
+    const periods = Object.keys(map).sort();
+    periods.forEach(p => {
+      const row = map[p] || {};
+      rows.push([
+        p,
+        (row.actual !== undefined ? row.actual : ''),
+        (row.predicted !== undefined ? row.predicted : ''),
+        (row.lower !== undefined ? row.lower : ''),
+        (row.upper !== undefined ? row.upper : ''),
+      ].join(','));
+    });
+
+    const csvContent = rows.join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', 'forecast.csv');
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const [exporting, setExporting] = useState(false);
+  const [computingBootstrap, setComputingBootstrap] = useState(false);
+  const asyncForecastRef = useRef(null); // holds latest async forecast promise (with revoke)
+  const prevForecastInputKeyRef = useRef(null);
+  // Dev diagnostic flag: set localStorage.setItem('JARVIS_DEV_DIAG','1') to enable lightweight logs
+  const devDiag = typeof window !== 'undefined' && !!localStorage.getItem('JARVIS_DEV_DIAG');
+  // const bootstrapWorkerRef = useRef(null); // reserved for cancellation if needed
+  // Linear regression on index -> value (sync + async bootstrap support)
+
+  useEffect(() => {
+    let cancelled = false;
+
+    // Build a compact, stable input key using a streaming FNV-1a hash so we avoid
+    // allocating a giant string for large datasets. We update the hash with
+    // small chunks (settings and each row) to produce a deterministic key.
+    const fnv1aInit = () => 2166136261 >>> 0;
+    const fnv1aUpdate = (h, str) => {
+      for (let i = 0; i < str.length; i++) {
+        h ^= str.charCodeAt(i);
+        h = Math.imul(h, 16777619) >>> 0;
+      }
+      return h;
+    };
+    const fnv1aDigest = (h) => (h >>> 0).toString(16);
+
+    let h = fnv1aInit();
+    // Add the config/settings
+    h = fnv1aUpdate(h, String(method));
+    h = fnv1aUpdate(h, '|');
+    h = fnv1aUpdate(h, String(monthsOut));
+    h = fnv1aUpdate(h, '|');
+    h = fnv1aUpdate(h, String(holtAlpha));
+    h = fnv1aUpdate(h, '|');
+    h = fnv1aUpdate(h, String(holtBeta));
+    h = fnv1aUpdate(h, '|');
+    h = fnv1aUpdate(h, holtBootstrap ? 'b' : 'n');
+    h = fnv1aUpdate(h, '|');
+    h = fnv1aUpdate(h, String(holtBootstrapSamples));
+    h = fnv1aUpdate(h, '|');
+    h = fnv1aUpdate(h, holtBootstrapAsync ? 'a' : 's');
+    h = fnv1aUpdate(h, '|');
+
+    // Stream the row data from monthlySeries (preferred) or fallback to records
+    if (monthlySeries && monthlySeries.length) {
+      h = fnv1aUpdate(h, String(monthlySeries.length));
+      for (let i = 0; i < monthlySeries.length; i++) {
+        const ms = monthlySeries[i];
+        // include period and numeric total as small updates
+        h = fnv1aUpdate(h, '|');
+        h = fnv1aUpdate(h, String(ms.period));
+        h = fnv1aUpdate(h, ':');
+        h = fnv1aUpdate(h, String(ms.total));
+      }
+    } else if (records && records.length) {
+      h = fnv1aUpdate(h, String(records.length));
+      for (let i = 0; i < records.length; i++) {
+        const r = records[i];
+        const period = r.period || r.date || '';
+        const val = r.total || r.MRR || '';
+        h = fnv1aUpdate(h, '|');
+        h = fnv1aUpdate(h, String(period));
+        h = fnv1aUpdate(h, ':');
+        h = fnv1aUpdate(h, String(val));
+      }
+    } else {
+      h = fnv1aUpdate(h, '0');
+    }
+
+    const inputKey = fnv1aDigest(h);
+
+    // If inputs haven't changed, skip recomputing
+    if (prevForecastInputKeyRef.current === inputKey) {
+      if (devDiag) console.debug('[jarvis] forecast effect skipped (inputKey unchanged)', inputKey);
+      return () => { cancelled = true; };
+    }
+    prevForecastInputKeyRef.current = inputKey;
+
+    if (devDiag) console.debug('[jarvis] forecast effect running, inputKey=', inputKey, { method, monthsOut, holtAlpha, holtBeta, holtBootstrap, holtBootstrapSamples, holtBootstrapAsync });
+
+    setComputingBootstrap(true);
+
+    // Use computeForecastFromRecords helper — it will aggregate monthly series and run forecast
+    try {
+      const maybe = computeForecastFromRecords(records && records.length ? records : (monthlySeries && monthlySeries.length ? monthlySeries.map(ms => ({ period: ms.period, total: ms.total })) : []), { method: method === 'holt' ? 'holt' : 'linear', monthsOut, holtOptions: { alpha: holtAlpha, beta: holtBeta, bootstrap: holtBootstrap, bootstrapSamples: holtBootstrapSamples, bootstrapAsync: holtBootstrapAsync } });
+      // The helper may return a Promise (if holt with async bootstrap), or an object
+      if (maybe && typeof maybe.then === 'function') {
+        asyncForecastRef.current = maybe;
+        maybe.then((res) => {
+          asyncForecastRef.current = null;
+          if (cancelled) return;
+          // res is the full object { monthlySeries, forecastResult }
+          setForecastResultState(res.forecastResult || res);
+        }).catch((err) => {
+          asyncForecastRef.current = null;
+          console.error('Async forecast failed', err);
+          // use refs to stable toast functions
+          try { (showToastRef.current || showCustomModalRef.current)('Async forecast failed. See console for details.', 'error'); } catch (e) {}
+        }).finally(() => { if (!cancelled) setComputingBootstrap(false); });
+      } else {
+        // synchronous result
+        const res = maybe || {};
+        setForecastResultState(res.forecastResult || res);
+        setComputingBootstrap(false);
+      }
+    } catch (err) {
+      console.error('Forecast compute failed', err);
+      try { (showToastRef.current || showCustomModalRef.current)('Forecast compute failed. See console for details.', 'error'); } catch (e) {}
+      setComputingBootstrap(false);
+    }
+
+    return () => { cancelled = true; };
+  // note: showToast/showCustomModal use refs above so they are omitted from deps to avoid identity churn
+  }, [records, monthlySeries, method, monthsOut, holtAlpha, holtBeta, holtBootstrap, holtBootstrapSamples, holtBootstrapAsync, devDiag, showCustomModalRef, showToastRef]);
+
+  // Render the forecast chart UI
+  return (
+    <div className="p-4 md:p-8">
+  <h2 className="text-3xl font-bold text-gray-900 mb-6 border-b pb-2">Forecasting & Trend Analysis</h2>
+      <div className="p-6 bg-white rounded-xl shadow-xl border border-gray-200">
+        <div className="flex justify-between items-center mb-4">
+          <p className="text-gray-600">Showing historical Actual monthly MRR and a simple linear projection with a 95% CI band.</p>
+          <div className="flex items-center space-x-2">
+            <label className="text-sm text-gray-600">Months to forecast:</label>
+            <input aria-label="Months to forecast" type="number" min="1" max="36" value={monthsOut} onChange={(e) => setMonthsOut(Number(e.target.value || 1))} className="w-20 p-1 rounded border" />
+            <label className="text-sm text-gray-600">Method:</label>
+            <select aria-label="Forecast method" value={method} onChange={(e) => setMethod(e.target.value)} className="p-1 rounded border bg-white">
+              <option value="linear">Linear OLS</option>
+              <option value="holt">Holt Linear</option>
+            </select>
+            {/* If Holt is selected, show alpha/beta controls */}
+            {method === 'holt' && (
+              <div className="flex items-center space-x-2">
+                <label className="text-sm text-gray-600">α</label>
+                <input type="range" min="0.01" max="1" step="0.01" value={holtAlpha} onChange={(e) => { const v = Number(e.target.value); setHoltAlpha(v); localStorage.setItem(HOLTPREF, JSON.stringify({ alpha: v, beta: holtBeta })); }} />
+                <label className="text-sm text-gray-600">β</label>
+                <input type="range" min="0.01" max="1" step="0.01" value={holtBeta} onChange={(e) => { const v = Number(e.target.value); setHoltBeta(v); localStorage.setItem(HOLTPREF, JSON.stringify({ alpha: holtAlpha, beta: v })); }} />
+                <div className="flex items-center space-x-2">
+                  <button type="button" disabled={tuning} className="px-3 py-1 bg-indigo-600 text-white rounded text-sm" onClick={async () => {
+                    try {
+                      if (!series || series.length < 3) { (showToast || showCustomModal)('Not enough data to auto-tune (min 3 months).', 'warn'); return; }
+                      (showToast || showCustomModal)('Running Holt auto-tune (fast search)...', 'info');
+                      setTuning(true);
+                      // run tuner (synchronous but quick)
+                      const res = holtAutoTune(series, { alpha: holtAlpha, beta: holtBeta });
+                      setHoltAlpha(res.alpha);
+                      setHoltBeta(res.beta);
+                      localStorage.setItem(HOLTPREF, JSON.stringify({ alpha: res.alpha, beta: res.beta, bootstrap: holtBootstrap, bootstrapSamples: holtBootstrapSamples, bootstrapAsync: holtBootstrapAsync }));
+                      (showToast || showCustomModal)(`Auto-tune completed — α=${res.alpha.toFixed(2)}, β=${res.beta.toFixed(2)}, MSE=${res.mse.toFixed(1)}`, 'success');
+                    } catch (err) {
+                      console.error('Auto-tune failed', err);
+                      (showToast || showCustomModal)('Auto-tune failed. See console for details.', 'error');
+                    } finally { setTuning(false); }
+                  }}>Auto-tune</button>
+
+                  <button type="button" disabled={tuning} className="px-3 py-1 bg-violet-600 text-white rounded text-sm" onClick={async () => {
+                    try {
+                      if (!series || series.length < 3) { (showToast || showCustomModal)('Not enough data to auto-tune (min 3 months).', 'warn'); return; }
+                      (showToast || showCustomModal)('Running Advanced Auto-tune (Nelder-Mead)...', 'info');
+                      setTuning(true);
+                      const res = await new Promise((resovle) => {
+                        // run advanced tuner (may take longer)
+                        const out = holtAutoTuneAdvanced(series, { alpha: holtAlpha, beta: holtBeta, maxIter: 300 });
+                        resovle(out);
+                      });
+                      setHoltAlpha(res.alpha);
+                      setHoltBeta(res.beta);
+                      localStorage.setItem(HOLTPREF, JSON.stringify({ alpha: res.alpha, beta: res.beta, bootstrap: holtBootstrap, bootstrapSamples: holtBootstrapSamples, bootstrapAsync: holtBootstrapAsync }));
+                      (showToast || showCustomModal)(`Advanced Auto-tune completed — α=${res.alpha.toFixed(3)}, β=${res.beta.toFixed(3)}, MSE=${res.mse.toFixed(2)}`, 'success');
+                    } catch (err) {
+                      console.error('Advanced Auto-tune failed', err);
+                      (showToast || showCustomModal)('Advanced Auto-tune failed. See console for details.', 'error');
+                    } finally { setTuning(false); }
+                  }}>Auto-tune (advanced)</button>
+                </div>
+                <label className="text-sm text-gray-600">Bootstrap CI</label>
+                <input type="checkbox" checked={holtBootstrap} onChange={(e) => { const v = !!e.target.checked; setHoltBootstrap(v); localStorage.setItem(HOLTPREF, JSON.stringify({ alpha: holtAlpha, beta: holtBeta, bootstrap: v, bootstrapSamples: holtBootstrapSamples, bootstrapAsync: holtBootstrapAsync })); }} />
+                <label className="text-sm text-gray-600">Async Bootstrap</label>
+                <input type="checkbox" checked={holtBootstrapAsync} onChange={(e) => { const v = !!e.target.checked; setHoltBootstrapAsync(v); localStorage.setItem(HOLTPREF, JSON.stringify({ alpha: holtAlpha, beta: holtBeta, bootstrap: holtBootstrap, bootstrapSamples: holtBootstrapSamples, bootstrapAsync: v })); }} />
+                {holtBootstrap && (
+                  <div className="flex items-center space-x-1">
+                    <label className="text-sm text-gray-600">Samples</label>
+                    <input type="number" min="50" max="2000" step="10" value={holtBootstrapSamples} onChange={(e) => { const v = Math.max(50, Number(e.target.value || 200)); setHoltBootstrapSamples(v); localStorage.setItem(HOLTPREF, JSON.stringify({ alpha: holtAlpha, beta: holtBeta, bootstrap: holtBootstrap, bootstrapSamples: v })); }} className="w-20 p-1 rounded border" />
+                    {computingBootstrap && (
+                      <span className="text-sm text-gray-500 ml-2">Computing CI...</span>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+            <button type="button" aria-label="Download forecast CSV" className="px-3 py-1 bg-green-500 text-white rounded text-sm" onClick={downloadCSV}>Download CSV</button>
+            <button type="button" aria-label="Download forecast image" disabled={exporting || !(chartRef && chartRef.current)} aria-disabled={exporting || !(chartRef && chartRef.current)} className="px-3 py-1 bg-blue-500 text-white rounded text-sm" onClick={async () => {
+              const container = chartRef && chartRef.current ? chartRef.current : null;
+              if (!container) { (showToast || showCustomModal)('No chart available to export.', 'error'); return; }
+              setExporting(true);
+              try {
+                const ok = await exportElementToPng(container, 'forecast_chart.png', 2);
+                if (ok) (showToast || showCustomModal)('Chart image downloaded.', 'success'); else (showToast || showCustomModal)('Failed to export chart image.', 'error');
+              } finally { setExporting(false); }
+            }}>{exporting ? 'Exporting...' : 'Download Image'}</button>
+            <button type="button" aria-label="Copy forecast image to clipboard" disabled={exporting || !(chartRef && chartRef.current)} aria-disabled={exporting || !(chartRef && chartRef.current)} className="px-3 py-1 bg-gray-500 text-white rounded text-sm" onClick={async () => {
+              const container = chartRef && chartRef.current ? chartRef.current : null;
+              if (!container) { (showToast || showCustomModal)('No chart available to copy.', 'error'); return; }
+              setExporting(true);
+              try {
+                const ok = await copyElementToClipboard(container, 2);
+                if (ok) (showToast || showCustomModal)('Chart image copied to clipboard.', 'success'); else (showToast || showCustomModal)('Failed to copy chart to clipboard. Your browser may block clipboard image writes.', 'error');
+              } finally { setExporting(false); }
+            }}>{exporting ? 'Exporting...' : 'Copy Image'}</button>
+            {computingBootstrap && (
+              <div className="flex items-center space-x-2">
+                <div className="text-sm text-gray-500">Computing CI...</div>
+                <button type="button" aria-label="Cancel CI" className="px-3 py-1 bg-red-500 text-white rounded text-sm" onClick={() => {
+                  try {
+                    if (asyncForecastRef.current && typeof asyncForecastRef.current.revoke === 'function') asyncForecastRef.current.revoke();
+                  } catch (e) { console.error('Cancel revoke failed', e); }
+                  asyncForecastRef.current = null;
+                  setComputingBootstrap(false);
+                  // keep last known forecast displayed — avoid calling setState with same value
+                  (showToast || showCustomModal)('Bootstrap CI cancelled.', 'info');
+                }}>Cancel CI</button>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div ref={chartRef} className="mt-4 h-64">
+          {combined.length === 0 ? (
+            <div className="h-56 bg-gray-50 border border-dashed border-gray-300 rounded-lg flex items-center justify-center text-gray-400">No monthly series data — load a dataset with a date and MRR column in the Data Dashboard.</div>
+          ) : (
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={combined} margin={{ top: 20, right: 30, left: 20, bottom: 20 }}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="period" />
+                <YAxis />
+                <ReTooltip formatter={(value) => typeof value === 'number' ? formatCurrency(value) : value} />
+                <Legend />
+                <Area type="monotone" dataKey="upper" stroke="none" fill="#BFDBFE" fillOpacity={0.4} isAnimationActive={false} />
+                <Area type="monotone" dataKey="lower" stroke="none" fill="#BFDBFE" fillOpacity={0.4} isAnimationActive={false} />
+                <Line type="monotone" dataKey="actual" stroke="#10B981" strokeWidth={2} dot={{ r: 3 }} />
+                <Line type="monotone" dataKey="predicted" stroke="#1D4ED8" strokeWidth={2} dot={{ r: 3 }} strokeDasharray="6 4" />
+                <Brush dataKey="period" height={30} stroke="#8884d8" />
+              </LineChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+        {/* Explainability panel: shows chosen model and parameters in friendly text */}
+        <div className="mt-4 p-3 bg-gray-50 border border-dashed rounded text-sm text-gray-700">
+          <div className="flex items-start justify-between">
+            <div>
+              <strong>Model:</strong> {method === 'holt' ? 'Holt Linear (double exponential smoothing)' : 'Linear regression (OLS)'}
+              <div className="text-xs text-gray-600 mt-1">{method === 'holt' ? `α=${holtAlpha.toFixed(2)}, β=${holtBeta.toFixed(2)}${holtBootstrap ? `, bootstrap=${holtBootstrapSamples} samples${holtBootstrapAsync ? ' (async)' : ''}` : ''}` : `Slope projection over historical period`}</div>
+            </div>
+            <div className="text-right text-xs text-gray-500">
+              <div>{series.length} months of history</div>
+              <div>{monthsOut} months forecast</div>
+            </div>
+          </div>
+          <div className="mt-2 text-xs text-gray-500">Tip: use Auto-tune for Holt when you have at least 6 months of history. Bootstrap CIs estimate uncertainty — enable async mode for large sample counts.</div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// Component 4: What-If Simulation
+const WhatIfSimulation = ({ enhancedCustomers, showCustomModal, chartRef, showToast = null }) => {
+    const [whatIfData, setWhatIfData] = useState({
+        discountEffect: 0.1, // Expected churn rate reduction from discount
+        supportEffect: 0.05, // Expected churn rate reduction from proactive support
+        campaignEffect: 0.15, // Expected churn rate reduction from re-engagement campaign
+        selectedRiskLevel: 'High',
+      });
+
+      // Scenario persistence (localStorage)
+      const STORAGE_KEY = 'jarvis_saved_scenarios_v1';
+      const [savedScenarios, setSavedScenarios] = useState([]);
+      const [scenarioName, setScenarioName] = useState('');
+      const [selectedScenarioId, setSelectedScenarioId] = useState(null);
+
+      // On mount, load any previously saved scenarios from localStorage
+      useEffect(() => {
+        try {
+          const raw = localStorage.getItem(STORAGE_KEY);
+          if (raw) setSavedScenarios(JSON.parse(raw));
+        } catch (e) {
+          // ignore parse errors
+        }
+        // Also attempt to fetch server-saved dashboards and merge when authenticated
+        (async () => {
+          try {
+            const meUser = await auth.me();
+            if (!meUser) return;
+            const resp = await auth.apiFetch('/api/dashboards/', { method: 'GET' });
+            if (!resp || !resp.ok) return;
+            const list = await resp.json().catch(() => null);
+            if (!Array.isArray(list)) return;
+            // Map server dashboards into local scenario shape if possible
+            const mapped = list.map(d => ({ id: `srv-${d.id}`, serverId: d.id, name: d.name || `Server Dashboard ${d.id}`, createdAt: d.created_at || d.createdAt || new Date().toISOString(), data: (d.config && d.config.data) || {} }));
+            // Merge server-saved dashboards before local ones (server-first)
+            setSavedScenarios(prev => {
+              // dedupe by serverId or id
+              const seen = new Set();
+              const combined = (mapped.concat(prev || [])).filter(s => {
+                const key = s.serverId ? `srv-${s.serverId}` : s.id;
+                if (seen.has(key)) return false; seen.add(key); return true;
+              }).slice(0,50);
+              try { localStorage.setItem(STORAGE_KEY, JSON.stringify(combined)); } catch (e) {}
+              return combined;
+            });
+          } catch (e) {
+            // ignore fetch errors (e.g., not authenticated or offline)
+          }
+        })();
+      }, []);
+
+      const persistScenarios = (list) => {
+        try { localStorage.setItem(STORAGE_KEY, JSON.stringify(list)); } catch (e) { /* ignore */ }
+      };
+
+      const saveScenario = () => {
+        const name = scenarioName && scenarioName.trim() ? scenarioName.trim() : `Scenario ${new Date().toLocaleString()}`;
+        const id = Date.now().toString();
+        const payload = { id, name, createdAt: new Date().toISOString(), data: whatIfData };
+        const next = [payload].concat(savedScenarios).slice(0, 50); // keep recent 50
+        // if authenticated, persist to server as a Dashboard
+        (async () => {
+          try {
+            const meUser = await auth.me();
+            if (meUser) {
+              const payloadToServer = { name, config: { data: whatIfData } };
+              try {
+                const resp = await auth.apiFetch('/api/dashboards/', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payloadToServer) });
+                if (resp.ok) {
+                  const body = await resp.json().catch(() => null);
+                  if (body && body.id) {
+                    const merged = [{ ...payloadToServer, serverId: body.id, id }].concat(savedScenarios).slice(0,50);
+                    setSavedScenarios(merged);
+                    persistScenarios(merged);
+                  }
+                  (showToast || showCustomModal)(`Saved scenario "${name}" to server.`, 'success');
+                  return;
+                }
+                console.warn('Server save failed', resp.status);
+              } catch (e) {
+                console.error('Server save error', e);
+              }
+            }
+            // fallback local
+            setSavedScenarios(next);
+            persistScenarios(next);
+            (showToast || showCustomModal)(`Saved scenario "${name}"`, 'success');
+          } catch (e) {
+            console.error('Save scenario failed', e);
+            setSavedScenarios(next);
+            persistScenarios(next);
+            (showToast || showCustomModal)(`Saved scenario "${name}"`, 'success');
+          }
+        })();
+
+        setScenarioName('');
+        setSelectedScenarioId(id);
+      };
+
+      // Autosave current draft to localStorage on every change so users can restore later
+      useEffect(() => {
+        try {
+          const draftKey = 'jarvis_autosave_whatif_v1';
+          localStorage.setItem(draftKey, JSON.stringify(whatIfData));
+        } catch (e) { /* ignore write errors (storage full) */ }
+      }, [whatIfData]);
+
+      // Export current target customers for the selected risk level as CSV
+      const exportScenarioCsv = () => {
+        const headers = ['id','name','MRR','riskScore','riskLevel','supportTickets','lastActivityDays'];
+        const rows = [headers.join(',')];
+        const { selectedRiskLevel } = whatIfData;
+        const target = enhancedCustomers.filter(c => selectedRiskLevel === 'All' || c.riskLevel === selectedRiskLevel);
+        target.forEach(c => {
+          rows.push([c.id, c.name || '', c.MRR || 0, c.riskScore || 0, c.riskLevel || '', c.supportTickets || 0, c.lastActivityDays || 0].map(v => `"${String(v).replace(/"/g,'""')}"`).join(','));
+        });
+        const blob = new Blob([rows.join('\n')], { type: 'text/csv' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = 'scenario_customers.csv'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+        (showToast || showCustomModal)(`Exported ${target.length} customer rows.`, 'success');
+      };
+
+      // Generate a short local summary string for the current scenario
+      const [scenarioSummary, setScenarioSummary] = useState('');
+      const generateSummary = () => {
+        const s = generateScenarioSummary(simulationResults, whatIfData);
+        setScenarioSummary(s);
+      };
+
+      const loadScenario = (s) => {
+        if (!s || !s.data) return;
+        setWhatIfData(s.data);
+        setSelectedScenarioId(s.id);
+        (showToast || showCustomModal)(`Loaded scenario "${s.name}"`, 'info');
+      };
+
+      const deleteScenario = (id) => {
+        const next = savedScenarios.filter(s => s.id !== id);
+        setSavedScenarios(next);
+        persistScenarios(next);
+        if (selectedScenarioId === id) setSelectedScenarioId(null);
+      };
+
+      // Simulation Logic (Memoized calculation for performance)
+      const simulationResults = useMemo(() => {
+        const { discountEffect, supportEffect, campaignEffect, selectedRiskLevel } = whatIfData;
+    
+        if (enhancedCustomers.length === 0) {
+            return { currentTotalMRR: 0, potentialMRRLoss: 0, simulatedMRRLoss: 0, projectedMRRSaved: 0, targetCustomerCount: 0 };
+        }
+
+        // Filter customers based on the simulation target risk level
+        const targetCustomers = enhancedCustomers.filter(c => 
+            selectedRiskLevel === 'All' || c.riskLevel === selectedRiskLevel
+        );
+    
+        const currentTotalMRR = enhancedCustomers.reduce((sum, c) => sum + (c.MRR || 0), 0);
+    
+        // 1. Baseline calculation (What we expect to lose without intervention among target customers)
+        const potentialMRRLoss = targetCustomers.reduce((loss, c) => {
+          const estimatedChurnRate = c.riskScore / 100;
+          return loss + (c.MRR * estimatedChurnRate);
+        }, 0);
+    
+        // 2. Simulated calculation (applying mitigation effects to reduce the rate)
+        const simulatedMRRLoss = targetCustomers.reduce((loss, c) => {
+          const estimatedChurnRate = c.riskScore / 100;
+          let reduction = 0;
+          
+          // Apply reduction based on customer characteristics and strategy effectiveness
+          if (c.MRR > 500) reduction += discountEffect;
+          if (c.supportTickets > 3) reduction += supportEffect;
+          if (c.lastActivityDays > 14) reduction += campaignEffect;
+          
+          reduction = Math.min(reduction, 0.95);
+    
+          // Calculate the new, reduced churn rate
+          const newChurnRate = estimatedChurnRate * (1 - reduction);
+          return loss + (c.MRR * newChurnRate);
+        }, 0);
+    
+        const projectedMRRSaved = potentialMRRLoss - simulatedMRRLoss;
+    
+        return {
+          currentTotalMRR,
+          potentialMRRLoss,
+          simulatedMRRLoss,
+          projectedMRRSaved,
+          targetCustomerCount: targetCustomers.length
+        };
+      }, [enhancedCustomers, whatIfData]);
+
+
+      const ResultBox = ({ title, value, color, isLarge = false }) => {
+        const colorClasses = {
+          red: 'bg-red-50 text-red-700 border-red-300',
+          green: 'bg-green-50 text-green-700 border-green-300',
+          blue: 'bg-blue-50 text-blue-700 border-blue-300',
+          orange: 'bg-yellow-50 text-yellow-700 border-yellow-300',
+        };
+        return (
+          <div className={`p-4 rounded-xl border ${colorClasses[color]} ${isLarge ? 'col-span-1 sm:col-span-2' : ''}`}>
+            <p className={`text-sm font-medium ${isLarge ? 'text-lg' : ''}`}>{title}</p>
+            <p className={`text-3xl font-extrabold ${isLarge ? 'text-5xl my-2' : 'mt-1'}`}>{value}</p>
+          </div>
+        );
+      };
+
+  return (
+    <div className="p-4 md:p-8" ref={chartRef}>
+          <h2 className="text-3xl font-bold text-gray-900 mb-6 border-b pb-2">Scenario Modeling: MRR Retention</h2>
+          
+          {enhancedCustomers.length === 0 ? (
+            <NoDataMessage />
+          ) : (
+            <div className="bg-white p-6 shadow-xl rounded-xl border border-blue-100 mb-8">
+              <h3 className="text-xl font-extrabold text-blue-800 mb-4 flex items-center">
+                <svg className="w-6 h-6 mr-2 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path></svg>
+                Forecasted MRR Savings
+              </h3>
+              <p className="text-gray-600 mb-4">Simulate the impact of retention strategies by adjusting their estimated effectiveness on high-risk customers.</p>
+        
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700">Target Risk Level</label>
+                  <select
+                    aria-label="Target risk level selector"
+                    value={whatIfData.selectedRiskLevel}
+                    onChange={(e) => setWhatIfData({ ...whatIfData, selectedRiskLevel: e.target.value })}
+                    className="mt-1 block w-full rounded-lg border-gray-300 shadow-sm p-2 bg-gray-50 focus:ring-blue-500 focus:border-blue-500 transition"
+                  >
+                    <option value="All">All Customers</option>
+                    <option value="High">High Risk Only (Score &ge; 70)</option>
+                    <option value="Medium">Medium Risk Only (Score 40-69)</option>
+                  </select>
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700">Saved Scenarios</label>
+                  <div className="mt-1 flex space-x-2">
+                    <input aria-label="Scenario name" value={scenarioName} onChange={(e) => setScenarioName(e.target.value)} placeholder="Name scenario (optional)" className="flex-1 p-2 rounded border bg-white" />
+                        <button aria-label="Save scenario" onClick={saveScenario} className="px-3 py-1 bg-indigo-600 text-white rounded text-sm">Save</button>
+                        <button aria-label="Export scenario CSV" onClick={exportScenarioCsv} className="px-3 py-1 bg-green-500 text-white rounded text-sm">Export CSV</button>
+                        <button aria-label="Generate summary" onClick={generateSummary} className="px-3 py-1 bg-gray-500 text-white rounded text-sm">Summary</button>
+                  </div>
+                  <div className="mt-2 max-h-40 overflow-auto border rounded bg-gray-50 p-2">
+                    {savedScenarios.length === 0 ? (
+                      <div className="text-xs text-gray-500">No saved scenarios</div>
+                    ) : (
+                      (() => {
+                        // build refs for the list
+                        const itemRefs = savedScenarios.map(() => React.createRef());
+                        return savedScenarios.map((s, idx) => {
+                          const ref = itemRefs[idx];
+                          const onKey = (e) => {
+                            if (e.key === 'ArrowDown') { e.preventDefault(); const next = itemRefs[idx+1] || itemRefs[0]; next && next.current && next.current.focus(); }
+                            if (e.key === 'ArrowUp') { e.preventDefault(); const prev = itemRefs[idx-1] || itemRefs[itemRefs.length-1]; prev && prev.current && prev.current.focus(); }
+                            if (e.key === 'Home') { e.preventDefault(); itemRefs[0] && itemRefs[0].current && itemRefs[0].current.focus(); }
+                            if (e.key === 'End') { e.preventDefault(); itemRefs[itemRefs.length-1] && itemRefs[itemRefs.length-1].current && itemRefs[itemRefs.length-1].current.focus(); }
+                            if (e.key === 'Enter') { e.preventDefault(); loadScenario(s); }
+                          };
+
+                          return (
+                            <div key={s.id} className={`flex items-center justify-between p-1 rounded ${selectedScenarioId === s.id ? 'bg-indigo-50 border border-indigo-100' : ''}`}>
+                    <button ref={ref} tabIndex={0} onKeyDown={onKey} aria-label={`Load scenario ${s.name}`} onClick={() => loadScenario(s)} className="text-left text-sm text-gray-800 truncate focus:outline-none focus:ring-2 focus:ring-indigo-500">{s.name}</button>
+                              <div className="flex items-center space-x-2">
+                                <button aria-label={`Load scenario ${s.name}`} title="Load" onClick={() => loadScenario(s)} className="px-2 py-0.5 bg-green-100 text-green-700 rounded text-xs">Load</button>
+            <div className="mt-3 flex items-center space-x-2">
+              <button aria-label="Export scenario JSON" onClick={() => {
+                const payload = { meta: { generatedAt: new Date().toISOString(), name: scenarioName || null }, data: whatIfData, results: simulationResults };
+                const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a'); a.href = url; a.download = 'scenario.json'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+                (showToast || showCustomModal)('Scenario JSON exported.', 'success');
+              }} className="px-3 py-1 bg-gray-700 text-white rounded text-sm">Export JSON</button>
+
+              <label className="px-3 py-1 bg-gray-100 rounded text-sm cursor-pointer">
+                Import JSON
+                <input type="file" accept="application/json" onChange={(e) => {
+                  const f = e.target.files && e.target.files[0]; if (!f) return;
+                  const r = new FileReader(); r.onload = (ev) => {
+                    try {
+                      const obj = JSON.parse(ev.target.result);
+                      if (obj && obj.data) { setWhatIfData(obj.data); (showToast || showCustomModal)('Imported scenario JSON.', 'success'); }
+                    } catch (err) { (showToast || showCustomModal)('Failed to import JSON.', 'error'); }
+                  }; r.readAsText(f);
+                }} style={{ display: 'none' }} />
+              </label>
+
+              <button aria-label="Restore autosaved draft" onClick={() => {
+                try {
+                  const draftKey = 'jarvis_autosave_whatif_v1';
+                  const raw = localStorage.getItem(draftKey);
+                  if (!raw) { (showToast || showCustomModal)('No autosave draft found.', 'warn'); return; }
+                  const d = JSON.parse(raw);
+                  setWhatIfData(d);
+                  (showToast || showCustomModal)('Restored autosaved draft.', 'success');
+                } catch (e) { (showToast || showCustomModal)('Failed to restore draft.', 'error'); }
+              }} className="px-3 py-1 bg-yellow-500 text-white rounded text-sm">Restore Draft</button>
+            </div>
+                                <button aria-label={`Delete scenario ${s.name}`} title="Delete" onClick={() => deleteScenario(s.id)} className="px-2 py-0.5 bg-red-100 text-red-700 rounded text-xs">Delete</button>
+                              </div>
+                            </div>
+                          );
+                        });
+                      })()
+                    )}
+                  </div>
+                </div>
+              </div>
+        
+              <div className="space-y-4">
+                <label className="block text-lg font-semibold text-blue-700 pt-2 border-t mt-4">Retention Strategy Effectiveness (Expected Churn Rate Reduction)</label>
+        
+                {['Discount Offer', 'Proactive Support', 'Re-engagement Campaign'].map((label, index) => {
+                  const key = index === 0 ? 'discountEffect' : index === 1 ? 'supportEffect' : 'campaignEffect';
+                  const effect = whatIfData[key];
+                  return (
+                    <div key={key}>
+                      <label className="text-sm font-medium text-gray-700 flex justify-between">
+                        <span>{label}</span>
+                        <span className="font-mono text-blue-600">{Math.round(effect * 100)}%</span>
+                      </label>
+                      <input
+                        type="range"
+                        min="0"
+                        max="0.3" 
+                        step="0.01"
+                        value={effect}
+                        aria-label={`${label} effectiveness`}
+                        onChange={(e) => setWhatIfData({ ...whatIfData, [key]: parseFloat(e.target.value) })}
+                        className="w-full h-2 bg-blue-100 rounded-lg appearance-none cursor-pointer range-lg focus:outline-none focus:ring-2 focus:ring-500 mt-1"
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+        
+              <div className="mt-6 border-t border-blue-200 pt-4">
+                <h4 className="text-lg font-bold text-gray-800 mb-3">Simulation Impact:</h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-center">
+                  <ResultBox title="Potential Loss (No Action)" value={formatCurrency(simulationResults.potentialMRRLoss)} color="red" />
+                  <ResultBox title="Projected Loss (With Actions)" value={formatCurrency(simulationResults.simulatedMRRLoss)} color="orange" />
+                  <ResultBox title="MRR Projected Saved" value={formatCurrency(simulationResults.projectedMRRSaved)} color="green" isLarge={true} />
+                  <ResultBox title="Total Current MRR" value={formatCurrency(simulationResults.currentTotalMRR)} color="blue" />
+                </div>
+                <p className="text-xs text-gray-500 mt-3 text-right">Targeting {simulationResults.targetCustomerCount} customer(s).</p>
+                {scenarioSummary && (
+                  <div className="mt-4 p-3 bg-gray-50 rounded border text-sm text-gray-700">{scenarioSummary}</div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+    );
+};
+
+
+// Component 5: Churn Predictor (High-Risk Tracker)
+const ChurnPredictor = ({ enhancedCustomers, handleContactCustomer, seedInitialData, computeChurnWhenMissing, setComputeChurnWhenMissing }) => {
+
+    const CustomerTable = ({ customers, onContact, seedInitialData }) => (
+        <div className="bg-white p-6 shadow-xl rounded-xl border border-red-100">
+          <h3 className="text-xl font-extrabold text-red-800 mb-4 flex items-center">
+            <svg className="w-6 h-6 mr-2 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+            High-Risk Customers & Contact Tracker
+          </h3>
+          {customers.length === 0 ? (
+            <div className="text-center py-8 text-gray-500">
+                No customer data loaded. Please use the **Data Dashboard** to load or seed initial data.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Customer</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">MRR</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Risk Score</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Last Activity (Days)</th>
+                    <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {/* Filter for High and Medium Risk for the tracker, ignoring Low Risk */}
+                  {customers.filter(c => c.riskLevel !== 'Low').map((c) => {
+                    const isHighRisk = c.riskLevel === 'High';
+                    const rowClass = isHighRisk ? 'bg-red-50 hover:bg-red-100 transition' : 'bg-yellow-50 hover:bg-yellow-100 transition';
+    
+                    return (
+                      <tr key={c.id} className={rowClass}>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                          {c.name}
+                          <span className={`ml-2 inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${c.riskLevel === 'High' ? 'bg-red-100 text-red-800' : 'bg-yellow-100 text-yellow-800'}`}>
+                            {c.riskLevel}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{formatCurrency(c.MRR)}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                          <div className="w-20 bg-gray-200 rounded-full h-2.5">
+                            <div
+                              className={`h-2.5 rounded-full ${c.riskLevel === 'High' ? 'bg-red-600' : 'bg-yellow-500'}`}
+                              style={{ width: `${c.riskScore.toFixed(0)}%` }}
+                              title={`${c.riskScore.toFixed(0)}%`}
+                            ></div>
+                          </div>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                            {c.lastActivityDays} days
+                            {c._churnComputed && (
+                              <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">computed churn</span>
+                            )}
+                            {c._churnProvided && (
+                              <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">provided</span>
+                            )}
+                            {c._churnComputed && c._churnDriver && (
+                              <span
+                                className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-indigo-100 text-indigo-800"
+                                title={c._churnContributions ? c._churnContributions.map(x => `${x.label}: ${(x.value*100).toFixed(0)}%`).join(' • ') : ''}
+                              >
+                                {c._churnDriver}
+                              </span>
+                            )}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                          {c.isContacted ? (
+                            <span className="inline-flex items-center px-3 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                              <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path></svg>
+                              Contacted
+                            </span>
+                          ) : (
+                            <button
+                              onClick={() => onContact(c.id)}
+                              className="text-white bg-red-500 hover:bg-red-600 focus:ring-4 focus:ring-red-300 font-medium rounded-lg text-xs px-3 py-1.5 transition shadow"
+                            >
+                              Mark Contacted
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <div className="mt-4 flex justify-end">
+            <button
+              type="button"
+              aria-label="Seed initial dummy data"
+              onClick={seedInitialData}
+              className="text-xs text-blue-500 hover:text-blue-700 transition"
+            >
+              Seed Initial Dummy Data
+            </button>
+          </div>
+        </div>
+      );
+    
+  return (
+    <div className="p-4 md:p-8">
+      <h2 className="text-3xl font-bold text-gray-900 mb-6 border-b pb-2">Churn Predictor: High-Risk Action List</h2>
+      {enhancedCustomers.length === 0 ? (
+        <NoDataMessage />
+      ) : (
+        <>
+          <div className="flex items-center justify-between mb-4">
+            <p className="text-gray-600">This list ranks customers with a churn risk score of <strong>40 or higher</strong>. Prioritize contacting the highest-risk customers to improve retention.</p>
+            <div className="flex items-center space-x-3">
+            <label className="flex items-center text-sm text-gray-600">
+              <input type="checkbox" checked={computeChurnWhenMissing} onChange={(e) => setComputeChurnWhenMissing(e.target.checked)} className="mr-2" />
+              Compute churn heuristically when missing
+            </label>
+            <button title="When enabled, the app will estimate churnProbability for rows that didn't provide it using a simple heuristic based on the computed risk score. Values computed this way will be marked in the table." className="text-xs text-gray-500 hover:text-gray-700">?</button>
+            </div>
+            <div className="mt-2 p-3 bg-gray-50 rounded text-sm text-gray-700">
+              <div className="mb-1 font-medium">How the toggle works</div>
+              <div className="text-xs mb-2">When enabled, the app will estimate a missing churnProbability from three observable features: Support Tickets, Days since last activity, and MRR. Use the <strong>Settings</strong> tab to adjust the relative importance (weights) of those features; weights are saved to your browser.</div>
+              {(() => {
+                // read current weights for a tiny inline preview
+                let current = { tickets: 0.5, activity: 0.35, mrr: 0.15 };
+                try { const raw = localStorage.getItem('jarvis_churn_weights_v1'); if (raw) current = JSON.parse(raw); } catch (e) {}
+                const sample = { MRR: 1200, supportTickets: 2, lastActivityDays: 10 };
+                // reuse estimator module
+                const estMod = require('./utils/churn');
+                const res = estMod.default(sample, current);
+                const est = (res && typeof res === 'object') ? (res.estimate || 0) : Number(res) || 0;
+                return (
+                  <div className="text-xs text-gray-600">
+                    <div>Current weights: Tickets {Math.round((current.tickets||0)*100)}% • Activity {Math.round((current.activity||0)*100)}% • MRR {Math.round((current.mrr||0)*100)}%</div>
+                    <div className="mt-1">Example (MRR 1200, 2 tickets, 10 days inactive): estimated churn ~ <strong className="text-blue-700">{(est*100).toFixed(1)}%</strong></div>
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+          <CustomerTable
+            customers={enhancedCustomers}
+            onContact={handleContactCustomer}
+            seedInitialData={seedInitialData}
+          />
+        </>
+      )}
+    </div>
+  );
+};
+
+
+// Component 6: Settings (Placeholder)
+const Settings = () => (
+    <SettingsInner />
+);
+
+// Separate component to enable hooks usage for settings
+const SettingsInner = () => {
+  const STORAGE_KEY = 'jarvis_churn_weights_v1';
+  const [weights, setWeights] = useState(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) return JSON.parse(raw);
+    } catch (e) {}
+    return { tickets: 0.5, activity: 0.35, mrr: 0.15 };
+  });
+
+  useEffect(() => {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(weights)); } catch (e) {}
+  }, [weights]);
+
+  const update = (k, v) => setWeights(prev => {
+    // ensure sum remains ~1 by normalizing after update
+    const next = { ...prev, [k]: v };
+    const s = (next.tickets || 0) + (next.activity || 0) + (next.mrr || 0) || 1;
+    return { tickets: (next.tickets || 0) / s, activity: (next.activity || 0) / s, mrr: (next.mrr || 0) / s };
+  });
+
+  return (
+    <div className="p-4 md:p-8">
+      <h2 className="text-3xl font-bold text-gray-900 mb-6 border-b pb-2">Settings & Configuration</h2>
+      <div className="p-8 bg-white rounded-xl shadow-xl border border-gray-200 space-y-4">
+        <div className="flex justify-between items-center border-b pb-4">
+          <label className="text-lg font-medium text-gray-700">Churn Estimator Weights</label>
+        </div>
+  <p className="text-gray-600">Adjust how the churn estimator weights features: Support Tickets, Last Activity (days), and MRR (lower MRR — higher risk).</p>
+        <div className="grid grid-cols-1 gap-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700">Support Tickets ({Math.round(weights.tickets * 100)}%)</label>
+            <input type="range" min="0" max="1" step="0.01" value={weights.tickets} onChange={(e) => update('tickets', Number(e.target.value))} className="w-full" />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700">Last Activity ({Math.round(weights.activity * 100)}%)</label>
+            <input type="range" min="0" max="1" step="0.01" value={weights.activity} onChange={(e) => update('activity', Number(e.target.value))} className="w-full" />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700">MRR ({Math.round(weights.mrr * 100)}%)</label>
+            <input type="range" min="0" max="1" step="0.01" value={weights.mrr} onChange={(e) => update('mrr', Number(e.target.value))} className="w-full" />
+          </div>
+        </div>
+        <div className="mt-4 p-4 bg-gray-50 rounded border text-sm">
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-sm text-gray-700 font-semibold">Estimator preview</div>
+            <div className="text-xs text-gray-500">Sample customer</div>
+          </div>
+          {/* sample customer used to preview weights */}
+          {(() => {
+            const sample = { MRR: 1200, supportTickets: 2, lastActivityDays: 10 };
+            const res = require('./utils/churn').default(sample, weights);
+            const estVal = res && typeof res === 'object' ? (res.estimate ?? 0) : Number(res) || 0;
+            return (
+              <div className="flex items-center justify-between">
+                <div className="text-xs text-gray-600">MRR 1200 • 2 tickets • 10 days inactive</div>
+                <div className="text-sm font-mono text-blue-700">{(estVal * 100).toFixed(1)}%</div>
+              </div>
+            );
+          })()}
+          <div className="mt-2 text-xs text-gray-500">This preview shows how the current slider weights influence a simple churn estimate. Values are illustrative.</div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// No Data Message
+const NoDataMessage = () => (
+    <div className="text-center py-16 text-xl text-gray-500 font-medium border border-dashed border-gray-300 rounded-xl bg-white shadow-inner">
+        <p className="mb-4">No customer data loaded.</p>
+        <p className="text-base text-gray-400">Please go to the **Data Dashboard** tab to load data from a CSV file or seed sample data.</p>
+    </div>
 );
 
 
-// --- MAIN APP COMPONENT ---
+// --- Main App Component ---
 
 const App = () => {
-  const [activeTab, setActiveTab] = useState('dashboard');
-  const [uploadedData, setUploadedData] = useState([]);
+  const [view, setView] = useState('dashboard'); 
+  const [customers, setCustomers] = useState([]);
+  // modal state removed; use toasts instead
 
-  const renderContent = () => {
-    switch (activeTab) {
-      case 'dashboard':
-        return <DataDashboard data={uploadedData} onDataUpload={setUploadedData} />;
-      case 'dataOverview':
-        return <DataOverview data={uploadedData} />;
-      case 'forecast':
-        return <TimeSeriesForecast data={uploadedData} />;
-      case 'simulation':
-        return <WhatIfSimulation data={uploadedData} />;
-      case 'churn':
-        return <ChurnAnalysis />;
-      case 'settings':
-        return <SettingsPanel />;
-      default:
-        return <DataDashboard data={uploadedData} onDataUpload={setUploadedData} />;
+  // Toast state: array of { id, message, type }
+  const [toasts, setToasts] = useState([]);
+  const pushToast = useCallback((message, type = 'info', timeout = 3500) => {
+    const id = Date.now().toString() + Math.random().toString(36).slice(2,6);
+    setToasts((t) => [{ id, message, type, timeout }].concat(t).slice(0,6));
+    return id;
+  }, []);
+  const removeToast = useCallback((id) => setToasts((t) => t.filter(x => x.id !== id)), []);
+  // Chart refs for reliable exports
+  const forecastChartRef = useRef(null);
+  const simulationChartRef = useRef(null);
+
+  const showToast = useCallback((message, type = 'info', timeout = 3500) => {
+    pushToast(message, type, timeout);
+  }, [pushToast]);
+
+  // Legacy showCustomModal now routes to non-blocking toast (keeps API compatible)
+  const showCustomModal = useCallback((message, type = 'info', timeout = 3500) => {
+    showToast(message, type, timeout);
+  }, [showToast]);
+
+  // Provide stable refs to the toast/modal functions so deeply nested effects
+  // (like TimeSeriesForecast) can call them without needing to include them
+  // in dependency lists which can cause identity churn.
+  const showToastRef = useRef(showToast);
+  const showCustomModalRef = useRef(showCustomModal);
+  useEffect(() => { showToastRef.current = showToast; }, [showToast]);
+  useEffect(() => { showCustomModalRef.current = showCustomModal; }, [showCustomModal]);
+
+  // notify helper removed (unused) — use showToast directly via refs where needed
+
+  // Handler to receive uploaded data (memoized to avoid identity churn)
+  const handleDataUpload = useCallback((newCustomers) => {
+    setCustomers(newCustomers);
+  }, [setCustomers]);
+
+  // Function to seed initial dummy data
+  const seedInitialData = useCallback(() => {
+    const dummyCustomers = [
+      { id: 'd1', name: 'Northbridge Systems', MRR: 4200, churnProbability: 0.12, supportTickets: 1, lastActivityDays: 5, contractLengthMonths: 12, isContacted: false },
+      { id: 'd2', name: 'Atlas Financial', MRR: 12500, churnProbability: 0.05, supportTickets: 0, lastActivityDays: 2, contractLengthMonths: 24, isContacted: false },
+      { id: 'd3', name: 'Horizon HealthTech', MRR: 3200, churnProbability: 0.28, supportTickets: 3, lastActivityDays: 18, contractLengthMonths: 12, isContacted: false },
+      { id: 'd4', name: 'Vertex Logistics', MRR: 900, churnProbability: 0.62, supportTickets: 5, lastActivityDays: 40, contractLengthMonths: 6, isContacted: false },
+      { id: 'd5', name: 'Aurora Retail', MRR: 2400, churnProbability: 0.18, supportTickets: 2, lastActivityDays: 7, contractLengthMonths: 12, isContacted: false },
+      { id: 'd6', name: 'Stratus AI', MRR: 7800, churnProbability: 0.09, supportTickets: 0, lastActivityDays: 1, contractLengthMonths: 36, isContacted: false },
+      { id: 'd7', name: 'Bluewater Media', MRR: 600, churnProbability: 0.55, supportTickets: 2, lastActivityDays: 30, contractLengthMonths: 12, isContacted: false },
+    ];
+    // ensure seeded customers include churn provenance where churnProbability is provided
+    const seeded = dummyCustomers.map(c => ({ ...c, _churnProvided: !!(c.churnProbability || c.churnProbability === 0) }));
+    setCustomers(seeded);
+    (showToast || showCustomModal)(`Successfully added ${dummyCustomers.length} initial customers to memory!`, 'success');
+  }, [setCustomers, showCustomModal, showToast]);
+
+  // Toggle: compute churn heuristics for rows that did not provide churnProbability
+  const [computeChurnWhenMissing, setComputeChurnWhenMissing] = useState(true);
+  // churn estimator (require to keep module resolution simple in CRA tests)
+  // we use the detailed estimator export from utils/churn
+  const estimateChurnFromFeaturesDetailed = require('./utils/churn').default; // detailed
+
+  // Calculate enhanced customer list (including risk score) whenever the raw customer list changes
+  const enhancedCustomers = useMemo(() => {
+    return customers.map(c => {
+      // If churn was not provided and user wants heuristics, compute from riskScore heuristically after riskScore calculation
+      const riskScore = calculateChurnRiskScore(c);
+      const riskLevel = riskScore >= 70 ? 'High' : riskScore >= 40 ? 'Medium' : 'Low';
+      const base = {
+        ...c,
+        riskScore,
+        riskLevel,
+      };
+
+      // churn provenance flags: supplied (_churnProvided) vs computed (_churnComputed)
+      let churnProvided = !!c._churnProvided;
+      let churnComputed = false;
+
+  // Compute churn when the user enabled heuristics AND either the CSV didn't provide churn
+  // or the churn value is missing/zero. This makes the toggle more robust to uploads
+  // where the churn column may be present but cells are empty/zero.
+  if (computeChurnWhenMissing && (!churnProvided || !c.churnProbability || Number(c.churnProbability) === 0)) {
+        // try estimator using supportTickets / lastActivityDays / MRR
+        try {
+          // load persisted weights from Settings (if any)
+          let weights = null;
+          try { const raw = localStorage.getItem('jarvis_churn_weights_v1'); if (raw) weights = JSON.parse(raw); } catch (e) { weights = null; }
+          const res = estimateChurnFromFeaturesDetailed(c, weights || undefined);
+          // estimator returns { estimate, contributions, mainDriver, raw }
+          base.churnProbability = Math.max(0, Math.min(1, Number(res?.estimate) || 0));
+          // attach explainability info for UI
+          base._churnDriver = res?.mainDriver ? (res.mainDriver.label || res.mainDriver.key) : null;
+          base._churnContributions = res?.contributions || null;
+          churnComputed = true;
+        } catch (e) {
+          // fallback to riskScore heuristic
+          const v = Math.min(1, Math.max(0, riskScore / 100));
+          base.churnProbability = v;
+          base._churnDriver = null;
+          base._churnContributions = null;
+          churnComputed = true;
+        }
+      }
+
+      base._churnProvided = churnProvided;
+      base._churnComputed = churnComputed;
+
+      return base;
+    }).sort((a, b) => b.riskScore - a.riskScore); // Sort by highest risk
+  }, [customers, computeChurnWhenMissing, estimateChurnFromFeaturesDetailed]);
+
+  // When the user enables/disables the heuristic toggle, apply or revert computed churn into
+  // the canonical `customers` state so Overview/Forecast views (which read `customers`) reflect it.
+  useEffect(() => {
+    // avoid running until estimator is available
+    if (!estimateChurnFromFeaturesDetailed) return;
+
+    if (computeChurnWhenMissing) {
+      // compute for rows that did not provide churn and aren't already computed
+      const weightsRaw = (() => { try { const raw = localStorage.getItem('jarvis_churn_weights_v1'); return raw ? JSON.parse(raw) : null;} catch (e) { return null; } })();
+      const updated = customers.map(c => {
+        const provided = !!c._churnProvided;
+        const hasChurn = c.churnProbability !== undefined && Number(c.churnProbability) !== 0;
+        if (!provided && !hasChurn && !c._churnComputed) {
+          try {
+            const res = estimateChurnFromFeaturesDetailed(c, weightsRaw || undefined);
+            return { ...c, _prevChurn: c.churnProbability, churnProbability: Math.max(0, Math.min(1, Number(res?.estimate) || 0)), _churnComputed: true, _churnDriver: res?.mainDriver ? (res.mainDriver.label || res.mainDriver.key) : null, _churnContributions: res?.contributions || null };
+          } catch (e) {
+            const fallback = Math.min(1, Math.max(0, calculateChurnRiskScore(c) / 100));
+            return { ...c, _prevChurn: c.churnProbability, churnProbability: fallback, _churnComputed: true };
+          }
+        }
+        return c;
+      });
+      // only set when something changed
+      const changed = updated.some((u, i) => u !== customers[i]);
+      if (changed) setCustomers(updated);
+    } else {
+      // revert computed churns back to previous values when toggle is disabled
+      const reverted = customers.map(c => {
+        if (c._churnComputed) {
+          const nc = { ...c };
+          if (nc._prevChurn !== undefined) {
+            nc.churnProbability = nc._prevChurn;
+          }
+          delete nc._prevChurn;
+          delete nc._churnComputed;
+          delete nc._churnDriver;
+          delete nc._churnContributions;
+          return nc;
+        }
+        return c;
+      });
+      const changed = reverted.some((u, i) => u !== customers[i]);
+      if (changed) setCustomers(reverted);
     }
-};
- 
-}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [computeChurnWhenMissing, customers]);
 
+  // Handler to mark customer as contacted
+  const handleContactCustomer = useCallback((customerId) => {
+    setCustomers(prevCustomers => 
+        prevCustomers.map(c => 
+            c.id === customerId ? { ...c, isContacted: true } : c
+        )
+    );
+    (showToast || showCustomModal)("Customer marked as contacted! (Local update)", 'info');
+  }, [setCustomers, showCustomModal, showToast]);
+
+
+  // Calculate Overview Data based on current customers
+  const overviewData = useMemo(() => {
+    let totalMRR = 0;
+    let customerCount = 0;
+  // Basic aggregations
+  customers.forEach(data => {
+    totalMRR += Number(data.MRR) || 0;
+    customerCount += 1;
+  });
+
+  const avgMrr = customerCount > 0 ? totalMRR / customerCount : 0;
+  const totalRevenue = totalMRR * 12; // Annualized
+
+  // Heuristic churn and NRR estimates (best-effort without event history)
+  // We approximate 'at-risk' customers as churnProbability >= 0.5
+  const atRiskCustomers = customers.filter(c => Number(c.churnProbability) >= 0.5);
+  const churnedMRR = atRiskCustomers.reduce((s, c) => s + (Number(c.MRR) || 0), 0);
+  const churnRateByCount = customerCount > 0 ? (atRiskCustomers.length / customerCount) : 0;
+
+  // Estimated expansion MRR heuristic: customers with churnProbability < 0.2 are 'expanding' slightly
+  const expansionCustomers = customers.filter(c => Number(c.churnProbability) < 0.2);
+  const expansionMRR = expansionCustomers.reduce((s, c) => s + ((Number(c.MRR) || 0) * 0.02), 0); // assume 2% expansion
+
+  // NRR estimate: (startingMRR + expansion - churn) / startingMRR
+  const estimatedNRR = totalMRR > 0 ? ((totalMRR + expansionMRR - churnedMRR) / Math.max(1, totalMRR)) : 1;
+
+  const monthlySeries = computeMonthlySeries(customers);
+
+  return {
+    customerCount,
+    totalMRR,
+    avgMrr,
+    totalRevenue,
+    churnedMRR,
+    churnRateByCount,
+    expansionMRR,
+    estimatedNRR,
+    monthlySeries,
+  };
+  }, [customers]);
+
+  // Onboarding modal (show once)
+  const [showOnboard, setShowOnboard] = useState(() => {
+    try { return !localStorage.getItem('jarvis_onboard_shown_v1'); } catch (e) { return true; }
+  });
+  const dismissOnboard = useCallback(() => {
+    try { localStorage.setItem('jarvis_onboard_shown_v1', '1'); } catch (e) {}
+    setShowOnboard(false);
+  }, []);
+
+
+  const renderView = () => {
+    switch (view) {
+      case 'dashboard':
+        return <DataDashboard onDataUpload={handleDataUpload} showCustomModal={showCustomModal} seedInitialData={seedInitialData} showToast={showToast} />;
+      case 'overview':
+        return <DataOverview overviewData={overviewData} />;
+      case 'forecast':
+        return <TimeSeriesForecast chartRef={forecastChartRef} monthlySeries={overviewData.monthlySeries} showCustomModal={showCustomModal} showToast={showToast} showToastRef={showToastRef} showCustomModalRef={showCustomModalRef} />;
+      case 'simulation':
+        return <WhatIfSimulation enhancedCustomers={enhancedCustomers} showCustomModal={showCustomModal} chartRef={simulationChartRef} showToast={showToast} />;
+      case 'churn':
+        return <ChurnPredictor enhancedCustomers={enhancedCustomers} handleContactCustomer={handleContactCustomer} seedInitialData={seedInitialData} computeChurnWhenMissing={computeChurnWhenMissing} setComputeChurnWhenMissing={setComputeChurnWhenMissing} />;
+      case 'settings':
+        return <Settings />;
+      default:
+        return <DataDashboard onDataUpload={handleDataUpload} showCustomModal={showCustomModal} seedInitialData={seedInitialData} />;
+    }
+  };
+
+  const navItemClass = (currentView) => (
+    `px-4 py-2 text-sm font-medium rounded-t-lg transition-colors duration-150 ${
+      view === currentView
+        ? 'bg-white text-blue-700 border-b-2 border-blue-700 font-semibold'
+        : 'text-gray-500 hover:text-blue-600 hover:bg-gray-100'
+    }`
+  );
+
+  return (
+    <div className="min-h-screen bg-gray-50 antialiased">
+        {/* Load Tailwind CSS */}
+        <script src="https://cdn.tailwindcss.com"></script>
+        {/* Set Inter font */}
+        <style>{`@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap'); body { font-family: 'Inter', sans-serif; }`}</style>
+      
+      <header className="bg-white shadow-md sticky top-0 z-10">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex flex-col md:flex-row justify-between items-center">
+      <div className="flex items-center space-x-3">
+        <img src={logo} alt="jArvIs360 by Data2Metrics" className="h-10 w-10 object-contain" />
+        <div>
+          <div className="text-xs text-gray-500">Data2Metrics</div>
+          <h1 className="text-2xl font-extrabold text-gray-900">jArvIs360</h1>
+        </div>
+      </div>
+          <div className="flex items-center space-x-4 text-xs text-gray-500">
+              <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-semibold bg-blue-100 text-blue-800`}>
+                Local Memory Mode
+              </span>
+              <AuthPanel showToast={showToast} />
+            </div>
+        </div>
+      </header>
+      {showOnboard && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40">
+          <div className="bg-white rounded-lg shadow-xl max-w-lg w-full p-6">
+            <h2 className="text-2xl font-bold mb-2">Welcome to Jarvis360</h2>
+            <p className="text-gray-600 mb-4">Quickly upload a CSV or load the demo data to see MRR forecasting, churn risk, and run what-if simulations — no setup required.</p>
+            <div className="flex justify-end space-x-2">
+              <button className="px-4 py-2 rounded text-sm bg-gray-100" onClick={dismissOnboard}>Dismiss</button>
+              <button className="px-4 py-2 rounded text-sm bg-blue-600 text-white" onClick={() => { dismissOnboard(); document.getElementById('load-demo-btn')?.click?.(); }}>Load Demo</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        {/* Navigation Tabs */}
+        <nav className="flex space-x-1 mt-4 border-b border-gray-200 overflow-x-auto whitespace-nowrap">
+            <button type="button" aria-label="Go to Data Intake" onClick={() => setView('dashboard')} className={navItemClass('dashboard')}>
+            Data Intake
+          </button>
+          <button type="button" aria-label="Go to Overview" onClick={() => setView('overview')} className={navItemClass('overview')}>
+            Overview
+          </button>
+          <button type="button" aria-label="Go to Forecasting" onClick={() => setView('forecast')} className={navItemClass('forecast')}>
+            Forecasting
+          </button>
+          <button type="button" aria-label="Go to Scenarios" onClick={() => setView('simulation')} className={navItemClass('simulation')}>
+            Scenarios
+          </button>
+          <button type="button" aria-label="Go to Risk & Actions" onClick={() => setView('churn')} className={navItemClass('churn')}>
+            Risk & Actions
+          </button>
+          <button type="button" aria-label="Go to Administration" onClick={() => setView('settings')} className={navItemClass('settings')}>
+            Administration
+          </button>
+        </nav>
+        
+        {/* Content Area */}
+        <main className="py-6 min-h-[70vh]">
+          {renderView()}
+        </main>
+      </div>
+      
+      {/* Toast container (bottom-right) */}
+      <div aria-live="polite" className="fixed right-4 bottom-4 z-50 flex flex-col-reverse space-y-reverse space-y-2 w-80">
+        {toasts.map(t => (
+          <div key={t.id} className="mb-2">
+            <Toast id={t.id} message={t.message} type={t.type} duration={t.timeout} onClose={removeToast} />
+          </div>
+        ))}
+      </div>
+
+  {/* CustomModal removed; toasts used instead */}
+    </div>
+  );
+};
 
 export default App;
