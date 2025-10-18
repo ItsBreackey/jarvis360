@@ -1,120 +1,107 @@
-// Minimal auth helper for storing token and calling the API with Authorization header
-// Cookie-only auth: do not persist token in localStorage. Rely on HttpOnly cookie 'auth_token' and /api/me() for status.
-const getToken = () => null;
-const getUsername = () => null;
-const setToken = () => {};
-const clearToken = () => {};
+// client/src/utils/auth.js
+// Single, concise auth helper for cookie-based JWT + token fallback
 
-// wrapper for fetch that supports auto-refresh-on-401 using refresh-cookie endpoint
-let _refreshPromise = null;
-const _doRefresh = async () => {
+// Allow overriding the API base (use REACT_APP_API_BASE). When developing with CRA on localhost:3000
+// prefer relative paths so the dev-server proxy (`src/setupProxy.js`) can forward /api to the Django backend
+let API_ROOT = '';
+if (typeof process !== 'undefined' && process.env && process.env.REACT_APP_API_BASE) {
+  API_ROOT = process.env.REACT_APP_API_BASE;
+} else if (typeof window !== 'undefined' && window.location && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') && window.location.port === '3000') {
+  API_ROOT = ''; // relative -> proxy (handle both localhost and 127.0.0.1 dev hosts)
+} else {
+  API_ROOT = 'http://127.0.0.1:8000';
+}
+
+async function safeJson(resp) {
+  try { return await resp.json(); } catch (e) { return null; }
+}
+
+async function refreshAccessCookie() {
   try {
-    const r = await fetch('/api/token/refresh-cookie/', { method: 'POST', credentials: 'same-origin' });
-    if (!r.ok) throw new Error('refresh failed');
-    return true;
-  } finally {
-    // clear the promise so subsequent 401s can attempt refresh again if needed
-    _refreshPromise = null;
-  }
-};
-
-const apiFetch = async (path, opts = {}) => {
-  const headers = new Headers(opts.headers || {});
-  if (!headers.has('Accept')) headers.set('Accept', 'application/json');
-  const final = Object.assign({}, opts, { headers });
-
-  // helper to do the actual fetch with credentials included
-  const doFetch = () => fetch(path, Object.assign({}, final, { credentials: 'same-origin' }));
-
-  let resp = await doFetch();
-  if (resp.status !== 401) return resp;
-
-  // If a refresh is already in progress, wait for it. Otherwise start one.
-  if (!_refreshPromise) _refreshPromise = _doRefresh();
-  try {
-    await _refreshPromise;
-  } catch (e) {
-    // refresh failed — return original 401
-    return resp;
-  }
-
-  // After refresh, retry original request once
-  try {
-    resp = await doFetch();
-    return resp;
-  } catch (e) {
-    return resp;
-  }
-};
-
-// register and login helpers
-const register = async ({ username, password, org_name, set_cookie = true }) => {
-  const resp = await fetch('/api/register/', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-    body: JSON.stringify({ username, password, org_name, set_cookie }),
-  });
-  if (!resp.ok) throw resp;
-  const body = await resp.json();
-  // when cookie mode is used, server sets HttpOnly cookie; we do not store token client-side
-  return body;
-};
-
-const login = async ({ username, password, use_cookie = true }) => {
-  // If use_cookie, call cookie login endpoint which will set HttpOnly cookie
-    if (use_cookie) {
-    const resp = await fetch('/api/login-cookie/', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-      body: JSON.stringify({ username, password }),
-      credentials: 'same-origin',
-    });
-    if (!resp.ok) throw resp;
-    const body = await resp.json();
-    return body;
-  }
-  const resp = await fetch('/api/token-auth/', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-    body: JSON.stringify({ username, password }),
-  });
-  if (!resp.ok) throw resp;
-  const body = await resp.json();
-  if (body.token) setToken(body.token, username);
-  return body;
-};
-
-const logout = async () => {
-  try {
-    // call server logout which will blacklist refresh token and clear cookies
-    await fetch('/api/token/logout/', { method: 'POST', credentials: 'same-origin' });
-    return true;
+    const resp = await fetch(`${API_ROOT}/api/token/refresh-cookie/`, { method: 'POST', credentials: 'include' });
+    return resp.ok;
   } catch (e) {
     return false;
   }
-};
+}
 
-const me = async () => {
-  try {
-    const resp = await fetch('/api/me/', { method: 'GET', credentials: 'same-origin' });
-    if (!resp.ok) return null;
-    const body = await resp.json();
-    return body.user || null;
-  } catch (e) {
-    return null;
+// apiFetch will include credentials and retry once after attempting refresh on 401
+async function apiFetch(path, opts = {}) {
+  const retry = opts._retry || false;
+  const fetchOpts = {
+    credentials: 'include',
+    headers: { ...(opts.headers || {}) },
+    method: opts.method || 'GET',
+    body: opts.body,
+  };
+  const url = path.startsWith('http') ? path : `${API_ROOT}${path}`;
+  const resp = await fetch(url, fetchOpts);
+  if (resp.status === 401 && !retry) {
+    const ok = await refreshAccessCookie();
+    if (ok) return apiFetch(path, { ...opts, _retry: true });
   }
-};
+  return resp;
+}
 
-const api = {
-  setToken,
-  getToken,
-  clearToken,
-  getUsername,
-  apiFetch,
-  register,
-  login,
-  logout,
-  me,
-};
+async function register({ username, password, email, org_name, set_cookie = true }) {
+  const resp = await apiFetch('/api/register/', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password, email, org_name, set_cookie }) });
+  const body = await safeJson(resp);
+  if (!resp.ok) {
+    const msg = (body && (body.error || body.detail || JSON.stringify(body))) || 'register failed';
+    throw new Error(msg);
+  }
+  try { const user = await me(); window.dispatchEvent(new CustomEvent('jarvis:auth-changed', { detail: { user } })); } catch (e) {}
+  return body;
+}
 
+async function login({ username, password, use_cookie = true }) {
+  if (use_cookie) {
+    const resp = await apiFetch('/api/login-cookie/', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }) });
+    const body = await safeJson(resp);
+    if (!resp.ok) {
+      const msg = (body && (body.error || body.detail || JSON.stringify(body))) || 'login failed';
+      throw new Error(msg);
+    }
+    // After setting HttpOnly cookies server-side, browsers may take a short moment to process them.
+    // Retry `me()` a few times with small backoff so callers receive the authenticated user when possible.
+    let user = null;
+    for (let i = 0; i < 6; i++) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        user = await me();
+        if (user) break;
+      } catch (e) { /* ignore */ }
+      // small delay (200ms)
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((res) => setTimeout(res, 200));
+    }
+    try { window.dispatchEvent(new CustomEvent('jarvis:auth-changed', { detail: { user } })); } catch (e) {}
+    return body;
+  }
+  const resp = await apiFetch('/api/token-auth/', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }) });
+  const body = await safeJson(resp);
+  if (!resp.ok) {
+    const msg = (body && (body.error || body.detail || JSON.stringify(body))) || 'login failed';
+    throw new Error(msg);
+  }
+  return body;
+}
+
+async function logout() {
+  try { await apiFetch('/api/token/logout/', { method: 'POST' }); } catch (e) { /* ignore */ }
+  try { await apiFetch('/api/logout-cookie/', { method: 'POST' }); } catch (e) { /* ignore */ }
+  try { window.dispatchEvent(new CustomEvent('jarvis:auth-changed', { detail: { user: null } })); } catch (e) {}
+  return true;
+}
+
+async function me() {
+  try {
+    const resp = await apiFetch('/api/me/', { method: 'GET' });
+    if (!resp.ok) return null;
+    const body = await safeJson(resp);
+    return body?.user || null;
+  } catch (e) { return null; }
+}
+
+const api = { apiFetch, register, login, logout, me, refreshAccessCookie };
 export default api;

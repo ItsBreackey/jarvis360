@@ -72,13 +72,67 @@ export function runCancelableHoltAutoTune(series, options = {}) {
     };
   `;
 
-  const blob = new Blob([workerSource], { type: 'application/javascript' });
-  const url = URL.createObjectURL(blob);
-  const worker = new Worker(url, { type: 'module' });
-
   let terminated = false;
+  let worker, url;
+
+  // If Worker or URL.createObjectURL isn't available (jest/jsdom), run inline fallback
+  const canUseWorker = typeof Worker !== 'undefined' && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function';
 
   const promise = new Promise((resolve, reject) => {
+    if (!canUseWorker) {
+      // Inline compute (async via setTimeout to avoid blocking test runner)
+      try {
+        setTimeout(() => {
+          try {
+            const total = alphaValues.length * betaValues.length;
+            let count = 0;
+            const progressInterval = Math.max(1, Math.floor(total / 20));
+            let best = { sse: Infinity, alpha: null, beta: null };
+            for (let ai = 0; ai < alphaValues.length; ai++) {
+              for (let bi = 0; bi < betaValues.length; bi++) {
+                const alpha = alphaValues[ai];
+                const beta = betaValues[bi];
+                // inline evaluate (same as worker)
+                if (!Array.isArray(series) || series.length < 2) continue;
+                let level = series[0];
+                let trend = (series[1] - series[0]) || 0;
+                let sse = 0;
+                for (let t = 1; t < series.length; t++) {
+                  const forecast = level + trend;
+                  const obs = series[t];
+                  const err = obs - forecast;
+                  sse += err * err;
+                  const newLevel = alpha * obs + (1 - alpha) * (level + trend);
+                  const newTrend = beta * (newLevel - level) + (1 - beta) * trend;
+                  level = newLevel;
+                  trend = newTrend;
+                }
+                count++;
+                if (sse < best.sse) best = { sse, alpha, beta };
+                if (count % progressInterval === 0) {
+                  try { if (onProgress) onProgress(Math.round(100 * count / total), best); } catch (err) { /* ignore */ }
+                }
+              }
+            }
+            if (!terminated) {
+              try { if (onProgress) onProgress(100, best); } catch (err) {}
+              resolve(best);
+            } else {
+              reject(new Error('terminated'));
+            }
+          } catch (err) {
+            reject(err);
+          }
+        }, 0);
+      } catch (err) { reject(err); }
+      return;
+    }
+
+    // Real worker path
+    const blob = new Blob([workerSource], { type: 'application/javascript' });
+    const url = URL.createObjectURL(blob);
+    const worker = new Worker(url, { type: 'module' });
+
     worker.onmessage = (ev) => {
       const msg = ev.data;
       if (msg && msg.type === 'progress') {
@@ -96,8 +150,8 @@ export function runCancelableHoltAutoTune(series, options = {}) {
   function cleanup(){
     if (!terminated){
       terminated = true;
-      try { worker.terminate(); } catch (e) { /* ignore */ }
-      try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ }
+      try { if (typeof worker !== 'undefined' && worker) worker.terminate(); } catch (e) { /* ignore */ }
+      try { if (typeof url !== 'undefined' && url) URL.revokeObjectURL(url); } catch (e) { /* ignore */ }
     }
   }
 

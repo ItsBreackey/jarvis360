@@ -41,6 +41,8 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'rest_framework',
     'corsheaders',
+    'rest_framework.authtoken',
+    'rest_framework_simplejwt.token_blacklist',
     'forecast',
     'analysis', # ADDED the new analysis app
     'api',
@@ -61,7 +63,10 @@ MIDDLEWARE = [
 
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",  # React dev server. For development only. Restrict in production.
+    "http://127.0.0.1:3000",  # allow numeric host origins too (some browsers use 127.0.0.1)
 ]  
+# Allow cookies and credentialed requests from the frontend during development
+CORS_ALLOW_CREDENTIALS = True
 
 
 ROOT_URLCONF = 'jarvis360.urls'
@@ -161,4 +166,7 @@ REST_FRAMEWORK = {
         'rest_framework.parsers.MultiPartParser',
         'rest_framework.parsers.FormParser',
     ],
+    # Use drf-spectacular's AutoSchema so the /api/schema/ endpoint (SpectacularAPIView)
+    # can introspect the API without raising "Incompatible AutoSchema" errors.
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
 }

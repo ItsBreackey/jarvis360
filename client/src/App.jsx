@@ -3,7 +3,9 @@ import './App.css';
 
 
 import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import auth from './utils/auth';
+import { useAuth } from './auth/AuthContext';
 import { parseCSV } from './utils/csv';
 import logo from './d2m_logo.png';
 import Toast from './Toast';
@@ -11,8 +13,32 @@ import ChurnChart from './ChurnChart';
 import { computeMonthlySeries as computeMonthlySeriesUtil, holtAutoTuneAdvanced } from './utils/analytics';
 import runCancelableHoltAutoTune from './utils/holtWorker';
 import { generateScenarioSummary } from './utils/summarizer';
-import { LineChart, Line, Area, XAxis, YAxis, CartesianGrid, Tooltip as ReTooltip, ResponsiveContainer, Brush, Legend } from 'recharts';
+import { LineChart, Line, Area, XAxis, YAxis, CartesianGrid, Tooltip as ReTooltip, ResponsiveContainer, Brush, Legend, BarChart, Bar, AreaChart } from 'recharts';
 import { computeForecastFromRecords } from './utils/forecast';
+// Cohort utilities and CSV helpers (previously used by standalone ARR page)
+import { generateCohortTable, topCustomers, generateCohortRetention, listCustomersForCell } from './utils/cohorts';
+import Modal from './components/Modal';
+import { toCSV, downloadCSV } from './utils/csv';
+
+// ErrorBoundary to avoid blank white screen on render errors
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { hasError: false, error: null }; }
+  static getDerivedStateFromError(err) { return { hasError: true, error: err }; }
+  componentDidCatch(error, info) {
+    console.error('[ErrorBoundary] caught error', error, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ padding: 32 }}>
+          <h2 style={{ color: '#b91c1c' }}>Something went wrong</h2>
+          <pre style={{ whiteSpace: 'pre-wrap', background: '#f8fafc', padding: 12, borderRadius: 6 }}>{String(this.state.error && this.state.error.stack ? this.state.error.stack : this.state.error)}</pre>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 // --- Utility Functions (Core Logic) ---
 
@@ -60,6 +86,18 @@ const formatCurrency = (amount) => {
     maximumFractionDigits: 0,
   }).format(amount);
 };
+
+// Small accessible info icon used across headings
+const InfoIcon = ({ title, srText }) => (
+  <span className="inline-flex items-center ml-2" title={title} aria-hidden="false">
+    <svg className="w-4 h-4 text-gray-400" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+      <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="1.5" />
+      <rect x="11" y="10" width="2" height="6" fill="currentColor" />
+      <rect x="11" y="7" width="2" height="2" fill="currentColor" />
+    </svg>
+    <span className="sr-only">{srText || title}</span>
+  </span>
+);
 
 // (svg-to-png helpers removed) use html2canvas-based exporters below for full-container captures
 
@@ -285,12 +323,12 @@ const DataDashboard = ({ onDataUpload, showCustomModal, seedInitialData, showToa
 
   return (
     <div className="p-4 md:p-8">
-      <h2 className="text-3xl font-bold text-gray-900 mb-6 border-b pb-2">Data Intake & Preparation</h2>
+      <h2 className="text-3xl font-bold text-gray-900 mb-6 border-b pb-2">Data Intake & Preparation<InfoIcon title="Upload CSVs and map columns (date, MRR, id)." srText="Data intake information" /></h2>
 
       <div className="bg-white p-6 shadow-xl rounded-xl border border-gray-100">
-        <p className="text-gray-700 mb-4">
-            Upload a **CSV file** to populate the customer data. Data is stored **only in your browser's memory** and is not persistent.
-        </p>
+    <p className="text-gray-700 mb-4">
+      Upload a <strong>CSV file</strong> to populate the customer data. Data is stored <strong>only in your browser's memory</strong> and is not persistent.
+    </p>
 
         <div className="mb-6 p-4 bg-blue-50 rounded-lg border border-blue-200">
           <h4 className="font-semibold text-blue-800 mb-2">Required CSV Format (Headers):</h4>
@@ -447,66 +485,28 @@ const DataDashboard = ({ onDataUpload, showCustomModal, seedInitialData, showToa
       
       <div className="mt-10 p-6 bg-yellow-50 rounded-xl border border-yellow-200 text-gray-700">
           <h3 className="font-semibold text-lg text-yellow-800 mb-2">Welcome to the SaaS Analytics Suite!</h3>
-          <p>
-              Use the tabs above to navigate the different modules: view your **Data Overview**, predict churn in the **Churn Predictor**, or run scenarios in the **What-If Simulation**.
-          </p>
+      <p>
+        Use the tabs above to navigate the different modules: view your <strong>Data Overview</strong>, predict churn in the <strong>Churn Predictor</strong>, or run scenarios in the <strong>What-If Simulation</strong>.
+      </p>
       </div>
     </div>
   );
 };
 
-// Small AuthPanel to register/login/logout
+// Small AuthPanel to show status and route to full auth pages
+
 const AuthPanel = ({ showToast = null }) => {
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [orgName, setOrgName] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
-  const [meUser, setMeUser] = useState(null);
-
-  const refreshMe = useCallback(async () => {
-    const u = await auth.me();
-    setMeUser(u ? u.username : null);
-  }, []);
-
-  useEffect(() => { refreshMe(); }, [refreshMe]);
-
-  const doRegister = async () => {
-    setLoading(true); setError(null);
-    try {
-      await auth.register({ username, password, org_name: orgName || username, set_cookie: true });
-      (showToast || (()=>{}))('Registration successful — logged in (cookie set).', 'success');
-      setUsername(''); setPassword(''); setOrgName('');
-      await refreshMe();
-    } catch (e) {
-      console.error('Register failed', e);
-      setError('Registration failed.');
-    } finally { setLoading(false); }
-  };
-
-  const doLogin = async () => {
-    setLoading(true); setError(null);
-    try {
-      await auth.login({ username, password, use_cookie: true });
-      (showToast || (()=>{}))('Login successful.', 'success');
-      setUsername(''); setPassword('');
-      await refreshMe();
-    } catch (e) {
-      console.error('Login failed', e);
-      setError('Login failed. Check credentials.');
-    } finally { setLoading(false); }
-  };
+  const { user, logout } = useAuth();
 
   const doLogout = async () => {
-    await auth.logout();
+    await logout();
     (showToast || (()=>{}))('Logged out.', 'info');
-    setMeUser(null);
   };
 
-  if (meUser) {
+  if (user) {
     return (
       <div className="flex items-center space-x-2">
-        <div className="text-xs text-gray-600">{meUser ? `Signed in as ${meUser}` : `Signed in`}</div>
+        <div className="text-xs text-gray-600">{user ? `Signed in as ${user.username || user}` : `Signed in`}</div>
         <button className="px-3 py-1 text-xs bg-red-100 text-red-700 rounded" onClick={doLogout}>Logout</button>
       </div>
     );
@@ -514,12 +514,8 @@ const AuthPanel = ({ showToast = null }) => {
 
   return (
     <div className="flex items-center space-x-2">
-      <input placeholder="org (for register)" value={orgName} onChange={(e) => setOrgName(e.target.value)} className="text-xs p-1 rounded border" />
-      <input placeholder="username" value={username} onChange={(e) => setUsername(e.target.value)} className="text-xs p-1 rounded border" />
-      <input placeholder="password" value={password} onChange={(e) => setPassword(e.target.value)} type="password" className="text-xs p-1 rounded border" />
-      <button className="px-3 py-1 bg-green-600 text-white rounded text-xs" disabled={loading} onClick={doLogin}>Login</button>
-      <button className="px-3 py-1 bg-blue-600 text-white rounded text-xs" disabled={loading} onClick={doRegister}>Register</button>
-      {error && <div className="text-xs text-red-600">{error}</div>}
+      <Link to="/login" className="text-xs text-blue-600">Sign in</Link>
+      <Link to="/register" className="text-xs text-blue-600">Create account</Link>
     </div>
   );
 };
@@ -543,11 +539,16 @@ const DataOverview = ({ overviewData }) => {
   <h2 className="text-3xl font-bold text-gray-900 mb-6 border-b pb-2">Overview — Key Metrics</h2>
   
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-          <StatCard title="Total Customers" value={overviewData?.customerCount || 'N/A'} description="Current customer count loaded." />
-          <StatCard title="Total Monthly Revenue" value={formatCurrency(overviewData?.totalMRR || 0)} description="Sum of all customers' MRR." />
-          <StatCard title="Average MRR" value={formatCurrency(overviewData?.avgMrr || 0)} description="Monthly Recurring Revenue per customer." />
-          <StatCard title="Est. Annual Revenue" value={formatCurrency(overviewData?.totalRevenue || 0)} description="Total MRR multiplied by 12." />
+          <StatCard title="Total Customers (Global)" value={overviewData?.customerCount || 'N/A'} description="Current customer count loaded (Global)." />
+          <div className="bg-white p-5 rounded-xl shadow-md border border-gray-200">
+            <p className="text-sm font-medium text-gray-500 truncate">Total Monthly Revenue (Global)</p>
+            <p className="mt-1 text-3xl font-extrabold text-gray-900">{formatCurrency(overviewData?.totalMRR || 0)}</p>
+            <p className="mt-2 text-xs text-gray-500">Sum of all customers' MRR.</p>
+          </div>
+          <StatCard title="Average MRR (Global)" value={formatCurrency(overviewData?.avgMrr || 0)} description="Monthly Recurring Revenue per customer (Global)." />
+          <StatCard title="Est. Annual Revenue (Global)" value={formatCurrency(overviewData?.totalRevenue || 0)} description="Total MRR multiplied by 12 (Global)." />
         </div>
+        <div className="mt-2 text-xs text-gray-500">Overview = global snapshot. Use the ARR tab for cohort-level breakdown.</div>
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 mt-6">
           <StatCard title="Churned MRR (est)" value={formatCurrency(overviewData?.churnedMRR || 0)} description="Heuristic of at-risk monthly MRR." />
@@ -555,8 +556,8 @@ const DataOverview = ({ overviewData }) => {
           <StatCard title="Churn % (by count)" value={`${Math.round((overviewData?.churnRateByCount || 0) * 100)}%`} description="Percent of customers flagged as at-risk." />
         </div>
         <div className="mt-8 p-6 bg-white shadow-xl rounded-xl border border-gray-100">
-          <h3 className="text-xl font-bold text-gray-800 mb-4">Core Metrics Chart</h3>
-          <p className="text-gray-600">New vs Expansion vs Churn (monthly) — simple stacked view.</p>
+          <h3 className="text-xl font-bold text-gray-800 mb-4">Core Metrics Chart <span className="ml-2 align-middle" title="Monthly revenue flows: New = first-month revenue; Expansion = upsells; Churn = revenue lost."><svg xmlns="http://www.w3.org/2000/svg" className="inline-block w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M12 2a10 10 0 100 20 10 10 0 000-20z"/></svg><span className="sr-only">Info: Monthly revenue flows — New, Expansion, Churn</span></span></h3>
+          <p className="text-gray-600">New vs Expansion vs Churn (monthly) — simple stacked view. <span className="ml-2 align-middle" title="Hover to read: New = revenue from newly acquired customers this month; Expansion = net positive MRR changes from existing customers; Churn = MRR lost this month."><svg xmlns="http://www.w3.org/2000/svg" className="inline-block w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M12 2a10 10 0 100 20 10 10 0 000-20z"/></svg><span className="sr-only">Info: New, Expansion, Churn definitions</span></span></p>
           {overviewData?.monthlySeries && overviewData.monthlySeries.length > 0 ? (
             <ChurnChart data={overviewData.monthlySeries} />
           ) : (
@@ -774,9 +775,9 @@ const TimeSeriesForecast = ({ chartRef, monthlySeries = [], records = [], showCu
             {method === 'holt' && (
               <div className="flex items-center space-x-2">
                 <label className="text-sm text-gray-600">α</label>
-                <input type="range" min="0.01" max="1" step="0.01" value={holtAlpha} onChange={(e) => { const v = Number(e.target.value); setHoltAlpha(v); localStorage.setItem(HOLTPREF, JSON.stringify({ alpha: v, beta: holtBeta })); }} />
+          <input type="range" min="0.01" max="1" step="0.01" value={holtAlpha} onChange={(e) => { const v = Number(e.target.value); setHoltAlpha(v); localStorage.setItem(HOLTPREF, JSON.stringify({ alpha: v, beta: holtBeta })); }} />
                 <label className="text-sm text-gray-600">β</label>
-                <input type="range" min="0.01" max="1" step="0.01" value={holtBeta} onChange={(e) => { const v = Number(e.target.value); setHoltBeta(v); localStorage.setItem(HOLTPREF, JSON.stringify({ alpha: holtAlpha, beta: v })); }} />
+          <input type="range" min="0.01" max="1" step="0.01" value={holtBeta} onChange={(e) => { const v = Number(e.target.value); setHoltBeta(v); localStorage.setItem(HOLTPREF, JSON.stringify({ alpha: holtAlpha, beta: v })); }} />
                 <div className="flex items-center space-x-2">
                   <button type="button" disabled={tuning} className="px-3 py-1 bg-indigo-600 text-white rounded text-sm" onClick={async () => {
                     try {
@@ -834,6 +835,9 @@ const TimeSeriesForecast = ({ chartRef, monthlySeries = [], records = [], showCu
                       (showToast || showCustomModal)('Advanced Auto-tune failed. See console for details.', 'error');
                     } finally { setTuning(false); }
                   }}>Auto-tune (advanced)</button>
+                  {tuning && (
+                    <div className="ml-3 text-sm text-gray-600">Auto-tune: {Math.round(tuningProgress)}%</div>
+                  )}
                 </div>
                 <label className="text-sm text-gray-600">Bootstrap CI</label>
                 <input type="checkbox" checked={holtBootstrap} onChange={(e) => { const v = !!e.target.checked; setHoltBootstrap(v); localStorage.setItem(HOLTPREF, JSON.stringify({ alpha: holtAlpha, beta: holtBeta, bootstrap: v, bootstrapSamples: holtBootstrapSamples, bootstrapAsync: holtBootstrapAsync })); }} />
@@ -925,6 +929,256 @@ const TimeSeriesForecast = ({ chartRef, monthlySeries = [], records = [], showCu
   );
 };
 
+// --- Inlined ARR View (previously pages/ArrDashboard.jsx) ---
+const ArrView = ({ records = [] }) => {
+  const cohorts = generateCohortTable(records, { dateKey: 'signup_date', valueKey: 'mrr', months: 12 });
+  const tops = topCustomers(records, { valueKey: 'mrr', idKey: 'customer_id', limit: 5 });
+  const [showRetention, setShowRetention] = useState(true);
+  const retention = useMemo(() => generateCohortRetention(records, { dateKey: 'signup_date', valueKey: 'mrr', months: 12 }), [records]);
+  const formatCurrencyLocal = (n) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(n);
+
+  const chartMonthly = useMemo(() => {
+    const months = cohorts.headers.length;
+    const data = cohorts.rows.map(r => r.values);
+    const out = [];
+    for (let i = 0; i < months; i++) {
+      let sum = 0;
+      for (const arr of data) sum += Number(arr[i] || 0);
+      out.push({ month: String(i), mrr: sum });
+    }
+    return out;
+  }, [cohorts]);
+
+  const stackedSeries = useMemo(() => {
+    const months = cohorts.headers.length;
+    const series = [];
+    for (let i = 0; i < months; i++) {
+      const item = { month: String(i) };
+      for (const r of cohorts.rows) item[r.cohort] = Number(r.values[i] || 0);
+      series.push(item);
+    }
+    return series;
+  }, [cohorts]);
+
+  const sparkline = useMemo(() => chartMonthly.slice(Math.max(0, chartMonthly.length - 6)), [chartMonthly]);
+  const cohortBars = useMemo(() => cohorts.rows.map(r => ({ cohort: r.cohort, initial: r.values[0] || 0 })), [cohorts]);
+  const totalMRR = useMemo(() => records.reduce((s, r) => s + (Number(r.mrr) || 0), 0), [records]);
+  const totalCustomers = useMemo(() => Array.from(new Set(records.map(r => r.customer_id))).length, [records]);
+  const ARR = totalMRR * 12;
+  const churnRate = useMemo(() => {
+    const rows = retention.rows || [];
+    let base = 0; let next = 0; const N = 1;
+    for (const r of rows) { base += Number(r.values[0] || 0); next += Number(r.values[N] || 0); }
+    if (base <= 0) return 0; return Math.max(0, Math.min(100, Math.round((1 - next / base) * 100)));
+  }, [retention]);
+
+  const [hover, setHover] = useState(null);
+  const [drill, setDrill] = useState(null);
+  const colorForPct = (pct) => { const h = Math.round((pct / 100) * 120); return `hsl(${h}, 70%, ${pct > 50 ? 40 : 60}%)`; };
+  const onCellClick = (cohort, idx) => { const rows = listCustomersForCell(records, { cohort, monthIndex: idx }); setDrill({ cohort, monthIndex: idx, rows }); };
+
+  const exportCohortCSV = () => {
+    const headers = ['cohort', ...cohorts.headers];
+    const rows = cohorts.rows.map(r => {
+      const out = { cohort: r.cohort };
+      cohorts.headers.forEach((h, i) => { out[h] = r.values[i] || 0; });
+      return out;
+    });
+    const text = toCSV(rows, headers);
+    downloadCSV('cohorts.csv', text);
+  };
+
+  return (
+    <div className="p-6">
+  <h1 className="text-2xl font-bold mb-4">ARR Dashboard<InfoIcon title="Cohort-based ARR, retention matrix, drilldowns, and CSV export." srText="ARR dashboard information" /></h1>
+      <section className="mb-6">
+        <h2 className="text-lg font-semibold">ARR Summary</h2>
+        <div className="mt-3 grid grid-cols-1 md:grid-cols-4 gap-3">
+          <div className="p-3 bg-white rounded shadow-sm border">
+            <div className="text-xs text-gray-500">MRR (Cohort)</div>
+            <div className="text-xl font-semibold">{formatCurrencyLocal(totalMRR)}</div>
+            <div className="text-xs text-gray-400">Monthly recurring revenue (cohort view)</div>
+          </div>
+          <div className="p-3 bg-white rounded shadow-sm border">
+            <div className="text-xs text-gray-500">ARR (Cohort)</div>
+            <div className="text-xl font-semibold">{formatCurrencyLocal(ARR)}</div>
+            <div className="text-xs text-gray-400">Annual recurring revenue (cohort view)</div>
+          </div>
+          <div className="p-3 bg-white rounded shadow-sm border">
+            <div className="text-xs text-gray-500">Customers (Cohort)</div>
+            <div className="text-xl font-semibold">{totalCustomers}</div>
+            <div className="text-xs text-gray-400">Active customers (cohort view)</div>
+          </div>
+          <div className="p-3 bg-white rounded shadow-sm border">
+            <div className="text-xs text-gray-500">Churn (month 0→1)</div>
+            <div className="text-xl font-semibold">{churnRate}%</div>
+            <div className="text-xs text-gray-400">Estimated</div>
+          </div>
+        </div>
+      </section>
+
+      <section className="mb-6 grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div className="col-span-2 bg-white rounded border p-3">
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-sm font-medium">ARR trend (monthly MRR)<InfoIcon title="Stacked cohort MRR by month (used to derive ARR)" srText="ARR trend information" /></div>
+            <div>
+              <button className="text-xs px-2 py-1 border rounded bg-gray-50" onClick={exportCohortCSV}>Export cohorts CSV</button>
+            </div>
+          </div>
+          <div style={{ width: '100%', height: 200 }}>
+            <ResponsiveContainer>
+              <AreaChart data={stackedSeries}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="month" />
+                <YAxis />
+                <ReTooltip formatter={(v) => formatCurrencyLocal(v)} />
+                {cohorts.rows.map((r, idx) => (
+                  <Area key={r.cohort} stackId="1" dataKey={r.cohort} stroke={idx % 2 ? '#60A5FA' : '#34D399'} fill={idx % 2 ? '#60A5FA' : '#34D399'} />
+                ))}
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+          <div style={{ width: 120, height: 40, marginTop: 8 }}>
+            <ResponsiveContainer>
+              <LineChart data={sparkline}>
+                <Line dataKey="mrr" stroke="#2563EB" strokeWidth={2} dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+
+        <div className="col-span-1 bg-white rounded border p-3">
+          <div className="text-sm font-medium mb-2">Cohort initial MRR</div>
+          <div style={{ width: '100%', height: 200 }}>
+            <ResponsiveContainer>
+              <BarChart data={cohortBars} layout="vertical">
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis type="number" />
+                <YAxis dataKey="cohort" type="category" />
+                <ReTooltip formatter={(v) => formatCurrencyLocal(v)} />
+                <Bar dataKey="initial" fill="#10B981" />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+          {tops.length > 0 && (
+            <div className="mt-3">
+              <div className="text-sm font-medium mb-1">Top customers</div>
+              <table className="w-full text-sm border-t">
+                <tbody>
+                  {tops.map(t => (
+                    <tr key={t.id} className="border-b">
+                      <td className="py-1">{t.id}</td>
+                      <td className="py-1 text-right">{formatCurrencyLocal(t.total)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </section>
+
+      <section>
+        <h2 className="text-lg font-semibold mb-2">Cohort table (signup-month)</h2>
+        <div className="flex items-center justify-between mb-2">
+          <div className="text-sm text-gray-600">Toggle: <label className="ml-2"><input type="checkbox" checked={showRetention} onChange={(e) => setShowRetention(e.target.checked)} /> Show retention %</label></div>
+        </div>
+          <div className="overflow-x-auto bg-white p-3 rounded border">
+            <table className="w-full text-sm mb-4">
+              <thead>
+                <tr>
+                  <th className="text-left">Cohort</th>
+                  {cohorts.headers.map(h => <th key={h} className="text-right">{h}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {cohorts.rows.map(row => (
+                  <tr key={row.cohort} className="border-t">
+                    <td className="font-medium py-2">{row.cohort}</td>
+                    {row.values.map((v, i) => <td key={i} className="text-right py-2">{formatCurrencyLocal(v)}</td>)}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            {showRetention && (
+              <div className="overflow-auto">
+                <div className="inline-block align-top">
+                  <table className="border-collapse text-xs">
+                    <thead>
+                      <tr>
+                        <th className="p-2 text-left">Cohort</th>
+                        {retention.headers.map(h => <th key={h} className="p-2 text-center">+{h}</th>)}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {retention.rows.map(r => (
+                        <tr key={r.cohort}>
+                          <td className="p-2 font-medium">{r.cohort}</td>
+                          {r.retention.map((pct, idx) => (
+                            <td key={idx} className="p-1">
+                              <div
+                                role="button"
+                                tabIndex={0}
+                                onMouseEnter={() => setHover({ cohort: r.cohort, monthIndex: idx, pct: Math.round(pct), value: r.values[idx] })}
+                                onMouseLeave={() => setHover(null)}
+                                onClick={() => onCellClick(r.cohort, idx)}
+                                style={{ width: 60, height: 30, background: colorForPct(pct), display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderRadius: 4, cursor: 'pointer' }}
+                                aria-label={`Cohort ${r.cohort} month ${idx} retention ${Math.round(pct)}%`}
+                              >
+                                <span style={{ color: pct > 50 ? '#fff' : '#000', fontWeight: 600 }}>{Math.round(pct)}%</span>
+                              </div>
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {hover && (
+                  <div className="mt-2 p-2 bg-white border rounded shadow text-sm inline-block">
+                    <div><strong>{hover.cohort}</strong> +{hover.monthIndex} month</div>
+                    <div>Retention: <strong>{hover.pct}%</strong></div>
+                    <div>MRR: {formatCurrencyLocal(hover.value || 0)}</div>
+                  </div>
+                )}
+
+                <Modal title={drill ? `${drill.cohort} +${drill.monthIndex} customers` : ''} open={!!drill} onClose={() => setDrill(null)}>
+                  {drill && (
+                    <div>
+                      <div className="text-sm text-gray-600 mb-2">{drill.rows.length} customers</div>
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr><th className="text-left">Customer</th><th className="text-right">MRR</th></tr>
+                        </thead>
+                        <tbody>
+                          {drill.rows.map((row, i) => (
+                            <tr key={i}><td>{row.customer_id || row.id || 'unknown'}</td><td className="text-right">{formatCurrencyLocal(row.mrr || 0)}</td></tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      <div className="mt-3 text-right">
+                        <button className="px-2 py-1 border rounded bg-gray-50" onClick={() => {
+                          const headers = ['customer_id','mrr','signup_date'];
+                          const rows = drill.rows.map(r => ({ customer_id: r.customer_id || r.id, mrr: r.mrr, signup_date: r.signup_date }));
+                          downloadCSV(`${drill.cohort}_${drill.monthIndex}_customers.csv`, toCSV(rows, headers));
+                        }}>Export CSV</button>
+                      </div>
+                    </div>
+                  )}
+                </Modal>
+              </div>
+            )}
+          </div>
+      </section>
+    </div>
+  );
+};
+
+// Named export for tests and optional external imports
+export { ArrView };
+
 // Component 4: What-If Simulation
 const WhatIfSimulation = ({ enhancedCustomers, showCustomModal, chartRef, showToast = null }) => {
     const [whatIfData, setWhatIfData] = useState({
@@ -949,7 +1203,7 @@ const WhatIfSimulation = ({ enhancedCustomers, showCustomModal, chartRef, showTo
           // ignore parse errors
         }
         // Also attempt to fetch server-saved dashboards and merge when authenticated
-        (async () => {
+        const fetchAndMerge = async () => {
           try {
             const meUser = await auth.me();
             if (!meUser) return;
@@ -961,7 +1215,6 @@ const WhatIfSimulation = ({ enhancedCustomers, showCustomModal, chartRef, showTo
             const mapped = list.map(d => ({ id: `srv-${d.id}`, serverId: d.id, name: d.name || `Server Dashboard ${d.id}`, createdAt: d.created_at || d.createdAt || new Date().toISOString(), data: (d.config && d.config.data) || {} }));
             // Merge server-saved dashboards before local ones (server-first)
             setSavedScenarios(prev => {
-              // dedupe by serverId or id
               const seen = new Set();
               const combined = (mapped.concat(prev || [])).filter(s => {
                 const key = s.serverId ? `srv-${s.serverId}` : s.id;
@@ -973,7 +1226,14 @@ const WhatIfSimulation = ({ enhancedCustomers, showCustomModal, chartRef, showTo
           } catch (e) {
             // ignore fetch errors (e.g., not authenticated or offline)
           }
-        })();
+        };
+
+        // run initially
+        fetchAndMerge();
+        // refresh when auth changes
+        const onAuth = () => { fetchAndMerge(); };
+        window.addEventListener('jarvis:auth-changed', onAuth);
+        return () => { window.removeEventListener('jarvis:auth-changed', onAuth); };
       }, []);
 
       const persistScenarios = (list) => {
@@ -1294,9 +1554,9 @@ const ChurnPredictor = ({ enhancedCustomers, handleContactCustomer, seedInitialD
             High-Risk Customers & Contact Tracker
           </h3>
           {customers.length === 0 ? (
-            <div className="text-center py-8 text-gray-500">
-                No customer data loaded. Please use the **Data Dashboard** to load or seed initial data.
-            </div>
+        <div className="text-center py-8 text-gray-500">
+        No customer data loaded. Please use the <strong>Data Dashboard</strong> to load or seed initial data.
+      </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="min-w-full divide-y divide-gray-200">
@@ -1511,7 +1771,7 @@ const SettingsInner = () => {
 const NoDataMessage = () => (
     <div className="text-center py-16 text-xl text-gray-500 font-medium border border-dashed border-gray-300 rounded-xl bg-white shadow-inner">
         <p className="mb-4">No customer data loaded.</p>
-        <p className="text-base text-gray-400">Please go to the **Data Dashboard** tab to load data from a CSV file or seed sample data.</p>
+  <p className="text-base text-gray-400">Please go to the <strong>Data Dashboard</strong> tab to load data from a CSV file or seed sample data.</p>
     </div>
 );
 
@@ -1521,6 +1781,35 @@ const NoDataMessage = () => (
 const App = () => {
   const [view, setView] = useState('dashboard'); 
   const [customers, setCustomers] = useState([]);
+  // E2E test hook: allow pre-seeding customers via localStorage key 'jarvis_e2e_seed'
+  useEffect(() => {
+    try {
+      const rawSeed = localStorage.getItem('jarvis_e2e_seed');
+      if (rawSeed) {
+        const parsed = JSON.parse(rawSeed);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          // normalize seeded customers and mark churn provenance
+          const normalized = parsed.map(c => ({ ...c, _churnProvided: !!(c.churnProbability || c.churnProbability === 0) }));
+          setCustomers((prev) => {
+            // idempotent: if prev already contains same number of customers with matching ids, skip re-setting
+            try {
+              if (Array.isArray(prev) && prev.length === normalized.length) {
+                const prevIds = new Set(prev.map(p => p && p.id));
+                const normIds = new Set(normalized.map(n => n && n.id));
+                if (prevIds.size === normIds.size && [...normIds].every(i => prevIds.has(i))) {
+                  console.debug('Pre-seed found but already applied; skipping setCustomers');
+                  return prev;
+                }
+              }
+            } catch (e) { /* ignore */ }
+            console.debug('Applying pre-seed customers from localStorage (jarvis_e2e_seed)', normalized.length);
+            return normalized;
+          });
+        }
+        localStorage.removeItem('jarvis_e2e_seed');
+      }
+    } catch (e) { /* ignore */ }
+  }, []);
   // modal state removed; use toasts instead
 
   // Toast state: array of { id, message, type }
@@ -1573,8 +1862,29 @@ const App = () => {
     // ensure seeded customers include churn provenance where churnProbability is provided
     const seeded = dummyCustomers.map(c => ({ ...c, _churnProvided: !!(c.churnProbability || c.churnProbability === 0) }));
     setCustomers(seeded);
-    (showToast || showCustomModal)(`Successfully added ${dummyCustomers.length} initial customers to memory!`, 'success');
+    try { (showToast || showCustomModal)(`Successfully added ${dummyCustomers.length} initial customers to memory!`, 'success'); } catch (e) { console.debug('seedInitialData toast failed', e); }
+    // helpful debug output for E2E runs
+    try { if (typeof console !== 'undefined' && console.info) console.info('seedInitialData: seeded', seeded.length); } catch (e) {}
   }, [setCustomers, showCustomModal, showToast]);
+
+  // Expose seed function to window for E2E tests to allow deterministic seeding
+  useEffect(() => {
+    try {
+      if (typeof window !== 'undefined') {
+        // always expose seedInitialData for E2E tests; make it safe to call repeatedly
+        Object.defineProperty(window, 'seedInitialData', {
+          configurable: true,
+          enumerable: false,
+          value: function() {
+            try { return seedInitialData(); } catch (e) { console.error('window.seedInitialData failed', e); }
+          }
+        });
+      }
+    } catch (e) {}
+    return () => {
+      try { if (typeof window !== 'undefined' && window.seedInitialData) delete window.seedInitialData; } catch (e) {}
+    };
+  }, [seedInitialData]);
 
   // Toggle: compute churn heuristics for rows that did not provide churnProbability
   const [computeChurnWhenMissing, setComputeChurnWhenMissing] = useState(true);
@@ -1731,6 +2041,15 @@ const App = () => {
   };
   }, [customers]);
 
+  // Prepare a lightweight records shape for ARR cohort utilities
+  const arrRecords = useMemo(() => {
+    return (customers || []).map(c => ({
+      customer_id: c.id || c.name || c.customer_id || c.id_str || null,
+      mrr: Number(c.MRR || c.mrr || c.monthly_revenue || 0) || 0,
+      signup_date: c.signup_date || c.date || c.start_date || c.created_at || null,
+    }));
+  }, [customers]);
+
   // Onboarding modal (show once)
   const [showOnboard, setShowOnboard] = useState(() => {
     try { return !localStorage.getItem('jarvis_onboard_shown_v1'); } catch (e) { return true; }
@@ -1751,6 +2070,8 @@ const App = () => {
         return <TimeSeriesForecast chartRef={forecastChartRef} monthlySeries={overviewData.monthlySeries} showCustomModal={showCustomModal} showToast={showToast} showToastRef={showToastRef} showCustomModalRef={showCustomModalRef} />;
       case 'simulation':
         return <WhatIfSimulation enhancedCustomers={enhancedCustomers} showCustomModal={showCustomModal} chartRef={simulationChartRef} showToast={showToast} />;
+      case 'arr':
+        return <ArrView records={arrRecords} />;
       case 'churn':
         return <ChurnPredictor enhancedCustomers={enhancedCustomers} handleContactCustomer={handleContactCustomer} seedInitialData={seedInitialData} computeChurnWhenMissing={computeChurnWhenMissing} setComputeChurnWhenMissing={setComputeChurnWhenMissing} />;
       case 'settings':
@@ -1782,6 +2103,9 @@ const App = () => {
         <div>
           <div className="text-xs text-gray-500">Data2Metrics</div>
           <h1 className="text-2xl font-extrabold text-gray-900">jArvIs360</h1>
+          <div className="text-sm mt-1">
+            <span className="text-xs text-gray-500">SaaS analytics toolkit</span>
+          </div>
         </div>
       </div>
           <div className="flex items-center space-x-4 text-xs text-gray-500">
@@ -1820,6 +2144,9 @@ const App = () => {
           <button type="button" aria-label="Go to Scenarios" onClick={() => setView('simulation')} className={navItemClass('simulation')}>
             Scenarios
           </button>
+          <button type="button" aria-label="Go to ARR" onClick={() => setView('arr')} className={navItemClass('arr')}>
+            ARR
+          </button>
           <button type="button" aria-label="Go to Risk & Actions" onClick={() => setView('churn')} className={navItemClass('churn')}>
             Risk & Actions
           </button>
@@ -1848,4 +2175,11 @@ const App = () => {
   );
 };
 
-export default App;
+// wrap export in ErrorBoundary so we see errors instead of a blank screen
+const WrappedApp = (props) => (
+  <ErrorBoundary>
+    <App {...props} />
+  </ErrorBoundary>
+);
+
+export default WrappedApp;
