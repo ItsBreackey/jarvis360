@@ -200,6 +200,8 @@ Autosave and persistence keys
 - Scenarios saved to localStorage: `jarvis_saved_scenarios_v1` (array of saved scenario objects).
 - Current what-if draft autosave: `jarvis_autosave_whatif_v1` (single object with current parameters).
 
+Note: The saved-scenarios list is canonicalized by `client/src/utils/scenarioPersistence.js`; production code should use `readSavedScenarios()` to read and `mergeAndPersistScenarios()` to write so optimistic local saves are merged safely with later server-confirmed writes.
+
 Testing
 -------
 - Unit tests are under `client/src/__tests__/` and run with Jest (react-scripts test). Current tests include:

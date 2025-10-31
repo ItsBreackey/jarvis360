@@ -3,9 +3,16 @@ from .views import (
     OverviewAPIView,
     SimulationAPIView,
     UploadCSVAPIView,
+    UploadedCSVDetailAPIView,
+    UploadedCSVReimportAPIView,
     DashboardListCreateAPIView,
     DashboardDetailAPIView,
+    PublicDashboardRetrieveAPIView,
     register_user,
+    ARRSummaryAPIView,
+    AutomationListCreateAPIView,
+    AutomationDetailAPIView,
+    AutomationRunAPIView,
 )
 from rest_framework.authtoken import views as drf_views
 from .views import login_cookie, logout_cookie, me, password_reset_request, password_reset_confirm
@@ -22,8 +29,11 @@ urlpatterns = [
 
     # Persistence endpoints
     path('uploads/', UploadCSVAPIView.as_view(), name='uploads'),
+    path('uploads/<int:pk>/', UploadedCSVDetailAPIView.as_view(), name='upload-detail'),
+    path('uploads/<int:pk>/reimport/', UploadedCSVReimportAPIView.as_view(), name='upload-reimport'),
     path('dashboards/', DashboardListCreateAPIView.as_view(), name='dashboards'),
     path('dashboards/<int:pk>/', DashboardDetailAPIView.as_view(), name='dashboard-detail'),
+    path('dashboards/slug/<slug:slug>/', PublicDashboardRetrieveAPIView.as_view(), name='dashboard-public'),
 
     # Auth endpoints
     path('token-auth/', drf_views.obtain_auth_token, name='api-token-auth'),
@@ -36,6 +46,11 @@ urlpatterns = [
     path('password-reset/confirm/', password_reset_confirm, name='password-reset-confirm'),
     path('token/refresh-cookie/', jwt_refresh_cookie, name='jwt-refresh-cookie'),
     path('token/logout/', jwt_logout, name='jwt-logout'),
+    path('arr-summary/', ARRSummaryAPIView.as_view(), name='arr-summary'),
+    # Automations (MVP)
+    path('automations/', AutomationListCreateAPIView.as_view(), name='automations'),
+    path('automations/<int:pk>/', AutomationDetailAPIView.as_view(), name='automation-detail'),
+    path('automations/<int:pk>/run/', AutomationRunAPIView.as_view(), name='automation-run'),
     # OpenAPI / Swagger
     path('schema/', SpectacularAPIView.as_view(), name='schema'),
     path('docs/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),

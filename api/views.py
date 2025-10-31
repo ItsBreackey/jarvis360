@@ -6,19 +6,25 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView
+from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView, RetrieveAPIView
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.authentication import TokenAuthentication
 from .serializers import UploadedCSVSerializer, DashboardSerializer
-from .models import UploadedCSV, Dashboard, Organization
+from .serializers import AutomationSerializer, AutomationExecutionSerializer
+from .models import Automation, AutomationExecution
+from .models import UploadedCSV, Dashboard, Organization, Subscription
+from .importer import import_single_upload
 from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
 from rest_framework.authtoken.models import Token as DRFToken
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
+from rest_framework.views import APIView
 from django.utils.text import slugify
 from .auth import CookieTokenAuthentication
+from django.db import IntegrityError
+from django.db.models import Q
 from rest_framework_simplejwt.token_blacklist.models import OutstandingToken, BlacklistedToken
 from django.core.mail import send_mail
 from django.conf import settings
@@ -273,6 +279,138 @@ class UploadCSVAPIView(ListCreateAPIView):
         serializer.save(uploaded_by=self.request.user, org=org, filename=getattr(self.request.FILES.get('file'), 'name', 'upload.csv'))
 
 
+class UploadedCSVDetailAPIView(RetrieveAPIView):
+    """Retrieve a single UploadedCSV (used by frontend to poll status)."""
+    serializer_class = UploadedCSVSerializer
+    permission_classes = [IsAuthenticated]
+    authentication_classes = [CookieTokenAuthentication]
+
+    def get_queryset(self):
+        profile = getattr(self.request.user, 'profile', None)
+        if profile and profile.org:
+            return UploadedCSV.objects.filter(org=profile.org)
+        return UploadedCSV.objects.filter(uploaded_by=self.request.user)
+
+
+class UploadedCSVReimportAPIView(APIView):
+    """Trigger a re-import for an existing UploadedCSV.
+
+    Uses the same idempotent claiming logic as the post-save handler. If a
+    Celery task is available it will enqueue the work; otherwise it will run
+    the import in a background thread after transaction commit. Returns 202
+    when the reimport is accepted/started, 400 on misuse, and 404 if not found.
+    """
+    permission_classes = [IsAuthenticated]
+    authentication_classes = [CookieTokenAuthentication]
+
+    def post(self, request, pk):
+        profile = getattr(request.user, 'profile', None)
+        if not profile or not profile.org:
+            return Response({'error': 'User must belong to an organization'}, status=status.HTTP_403_FORBIDDEN)
+
+        upload = UploadedCSV.objects.filter(pk=pk, org=profile.org).first()
+        if not upload:
+            return Response({'error': 'upload not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Do not allow re-import if no file is attached
+        if not upload.file:
+            return Response({'error': 'no file to import'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # If subscriptions already exist for this upload, return 200 with info
+        if Subscription.objects.filter(source_upload=upload).exists():
+            # Include a Retry-After header so the frontend can show a cooldown even when nothing was re-imported.
+            retry_after = getattr(settings, 'REIMPORT_RATE_LIMIT_SECONDS', 60)
+            return Response({'ok': True, 'message': 'already imported', 'subscriptions_created': upload.subscriptions_created}, status=status.HTTP_200_OK, headers={'Retry-After': str(retry_after)})
+
+        # Rate-limit repeated reimport attempts per-upload to avoid abuse
+        from django.core.cache import cache
+        limit_seconds = getattr(settings, 'REIMPORT_RATE_LIMIT_SECONDS', 60)
+        # Use per-user-per-upload rate limit key so different users can retry separately
+        user_part = f":{request.user.pk}" if getattr(request, 'user', None) and getattr(request.user, 'pk', None) else ''
+        cache_key = f"reimport_lock:{upload.pk}{user_part}"
+
+        # If user is not staff, reject when cache key present
+        if not (getattr(request, 'user', None) and getattr(request.user, 'is_staff', False)):
+            if cache.get(cache_key):
+                return Response({'error': 'rate limited'}, status=status.HTTP_429_TOO_MANY_REQUESTS, headers={'Retry-After': str(limit_seconds)})
+
+        # Headers to return on accepted/enqueued/started responses so client can start cooldown immediately
+        headers = {'Retry-After': str(limit_seconds)}
+
+        # Atomically claim the upload if it's still pending
+        from django.utils import timezone
+        rows = UploadedCSV.objects.filter(pk=upload.pk, status=UploadedCSV.STATUS_PENDING).update(
+            status=UploadedCSV.STATUS_IMPORTING,
+            status_started_at=timezone.now(),
+            error_message='',
+            subscriptions_created=0,
+        )
+
+        # Set the rate-limit key so subsequent immediate reimports are rejected
+        try:
+            cache.set(cache_key, True, timeout=limit_seconds)
+        except Exception:
+            pass
+
+        if not rows:
+            # Already claimed or in-progress; return accepted
+            return Response({'ok': True, 'message': 'already being processed'}, status=status.HTTP_202_ACCEPTED, headers=headers)
+
+        # If configured for DEBUG synchronous imports, run importer inline (used by tests)
+        if getattr(settings, 'DEBUG_IMPORT_SYNC', False):
+            try:
+                created = import_single_upload(upload, sample_lines=getattr(settings, 'IMPORT_SAMPLE_LINES', 200))
+                UploadedCSV.objects.filter(pk=upload.pk).update(
+                    status=UploadedCSV.STATUS_COMPLETE,
+                    completed_at=timezone.now(),
+                    subscriptions_created=int(created or 0),
+                )
+                return Response({'ok': True, 'message': 'imported', 'created': int(created or 0)}, status=status.HTTP_200_OK, headers=headers)
+            except Exception:
+                import traceback as _tb
+                tb = _tb.format_exc()
+                UploadedCSV.objects.filter(pk=upload.pk).update(
+                    status=UploadedCSV.STATUS_ERROR,
+                    error_message='Import failed (see server logs)\n' + tb[:1000],
+                )
+                return Response({'error': 'import failed'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR, headers=headers)
+
+        # Enqueue or start background thread like the post_save handler
+        try:
+            from .tasks import import_uploaded_csv_task
+        except Exception:
+            import_uploaded_csv_task = None
+
+        if import_uploaded_csv_task is not None and hasattr(import_uploaded_csv_task, 'delay'):
+            try:
+                import_uploaded_csv_task.delay(upload.pk)
+                return Response({'ok': True, 'message': 'enqueued'}, status=status.HTTP_202_ACCEPTED, headers=headers)
+            except Exception:
+                # fall through to thread-based execution
+                pass
+
+        # fallback: start background thread after commit
+        def _start_thread():
+            try:
+                from django.db import close_old_connections
+                close_old_connections()
+            except Exception:
+                pass
+            import threading
+            from .signals import _run_import_sync
+            t = threading.Thread(target=_run_import_sync, args=(upload.pk,))
+            t.daemon = True
+            t.start()
+
+        try:
+            from django.db import transaction
+            transaction.on_commit(_start_thread)
+        except Exception:
+            _start_thread()
+
+        return Response({'ok': True, 'message': 'started'}, status=status.HTTP_202_ACCEPTED, headers=headers)
+
+
 class DashboardListCreateAPIView(ListCreateAPIView):
     serializer_class = DashboardSerializer
     permission_classes = [IsAuthenticated]
@@ -284,7 +422,13 @@ class DashboardListCreateAPIView(ListCreateAPIView):
             # Users without orgs should not see any dashboards
             return Dashboard.objects.none()
         org = profile.org
-        return Dashboard.objects.filter(org=org).order_by('-updated_at')
+        # Show dashboards that are public within the org, plus any dashboards
+        # owned by the requesting user (even if private). This prevents users
+        # from seeing other users' private dashboards while allowing public
+        # dashboards to be visible org-wide.
+        return Dashboard.objects.filter(org=org).filter(
+            Q(visibility=Dashboard.VISIBILITY_PUBLIC) | Q(created_by=self.request.user)
+        ).order_by('-updated_at')
 
     def perform_create(self, serializer):
         profile = getattr(self.request.user, 'profile', None)
@@ -293,10 +437,39 @@ class DashboardListCreateAPIView(ListCreateAPIView):
             raise PermissionDenied('User must belong to an organization to create dashboards.')
         org = profile.org
         # Auto-generate slug from name if not provided
-        slug = serializer.validated_data.get('slug') or None
-        if not slug and 'name' in serializer.validated_data:
-            slug = slugify(serializer.validated_data['name'])[:250]
-        serializer.save(created_by=self.request.user, org=org, slug=slug)
+        base_slug = serializer.validated_data.get('slug') or None
+        if not base_slug and 'name' in serializer.validated_data:
+            base_slug = slugify(serializer.validated_data['name'])[:250]
+
+        # Helper: generate a unique slug within the org by appending a numeric
+        # suffix when collisions are found. This avoids bubbling up IntegrityError
+        # for the common case and provides a deterministic fallback.
+        def generate_unique_slug(org_obj, base):
+            if not base:
+                # Fallback generic base
+                base = 'scenario'
+            base = base[:250]
+            candidate = base
+            counter = 1
+            # Limit attempts to avoid an infinite loop in pathological cases
+            while Dashboard.objects.filter(org=org_obj, slug=candidate).exists():
+                suffix = f"-{counter}"
+                max_base_len = 250 - len(suffix)
+                candidate = f"{base[:max_base_len]}{suffix}"
+                counter += 1
+                if counter > 1000:
+                    break
+            return candidate
+
+        slug = generate_unique_slug(org, base_slug)
+
+        try:
+            serializer.save(created_by=self.request.user, org=org, slug=slug)
+        except IntegrityError:
+            # Race condition or unexpected duplicate — translate to DRF ValidationError
+            logger.exception('IntegrityError while creating Dashboard; slug collision')
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({'slug': ['A dashboard with this slug already exists. Try renaming the scenario.']})
 
 
 class DashboardDetailAPIView(RetrieveUpdateDestroyAPIView):
@@ -309,7 +482,30 @@ class DashboardDetailAPIView(RetrieveUpdateDestroyAPIView):
         if not profile or not profile.org:
             return Dashboard.objects.none()
         org = profile.org
-        return Dashboard.objects.filter(org=org)
+        return Dashboard.objects.filter(org=org).filter(Q(visibility=Dashboard.VISIBILITY_PUBLIC) | Q(created_by=self.request.user))
+
+    def perform_update(self, serializer):
+        # Only owners or org admins can update visibility/name/config
+        profile = getattr(self.request.user, 'profile', None)
+        if not profile or not profile.org:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('User must belong to an organization to update dashboards.')
+        # Save normally; server will enforce org scoping via queryset
+        serializer.save()
+
+
+class PublicDashboardRetrieveAPIView(RetrieveAPIView):
+    """Retrieve a public dashboard by slug without authentication."""
+    serializer_class = DashboardSerializer
+    permission_classes = []
+    authentication_classes = []
+
+    def get(self, request, slug):
+        db = Dashboard.objects.filter(slug=slug, visibility=Dashboard.VISIBILITY_PUBLIC).first()
+        if not db:
+            return Response({'error': 'not found'}, status=status.HTTP_404_NOT_FOUND)
+        ser = self.serializer_class(db)
+        return Response(ser.data, status=status.HTTP_200_OK)
 
 
 @api_view(['POST'])
@@ -447,3 +643,147 @@ def jwt_logout(request):
     resp.delete_cookie('refresh_token')
     return resp
 
+
+class ARRSummaryAPIView(APIView):
+    """Minimal ARR summary endpoint used by the frontend dashboard.
+
+    This implementation is intentionally small: it demonstrates how to call the
+    cohort utilities and return a simple JSON payload. It uses UploadedCSV model
+    as a source of 'customer' signup dates if available; otherwise returns an
+    empty structure.
+    """
+    permission_classes = [IsAuthenticated]
+    authentication_classes = [CookieTokenAuthentication]
+
+    def get(self, request):
+        # For now, gather signup_date and a synthetic "active_months" if available
+        # UploadedCSV may represent uploads; we treat each UploadedCSV as one customer for demo
+        qs = UploadedCSV.objects.none()
+        profile = getattr(request.user, 'profile', None)
+        if profile and profile.org:
+            qs = UploadedCSV.objects.filter(org=profile.org)
+
+        signups = []
+        for u in qs:
+            # Try to extract a signup_date from the CSV metadata if present, else created_at
+            sd = getattr(u, 'created_at', None)
+            # Synthetic active months: 1 for all (placeholder)
+            signups.append((sd.date() if sd else None, 1))
+
+        from analysis.cohorts import cohortize, retention_matrix
+        from analysis.arr import compute_mrr_and_arr, top_customers_by_mrr
+
+        cohorts = cohortize([d for d, _ in signups if d])
+        matrix = retention_matrix(signups)
+
+        # Prefer canonical normalized subscriptions when present
+        try:
+            from .models import Subscription
+            subs_qs = Subscription.objects.none()
+            if profile and profile.org:
+                subs_qs = Subscription.objects.filter(customer__org=profile.org)
+            # Build records from subscription rows
+            records = []
+            for s in subs_qs:
+                records.append({'customer_id': s.customer.external_id or s.customer.name or str(s.customer.pk), 'mrr': float(s.mrr), 'signup_date': s.start_date})
+            kpis = compute_mrr_and_arr(records) if records else {'MRR': 0.0, 'ARR': 0.0}
+            tops = top_customers_by_mrr(records, limit=10) if records else []
+        except Exception:
+            # Fallback to parsing uploads (legacy behavior)
+            from analysis.normalize import normalize_csv_text
+            records = []
+            for u in qs:
+                try:
+                    if not u.file:
+                        continue
+                    u.file.open('rb')
+                    raw = u.file.read(128 * 1024).decode('utf-8', errors='ignore')
+                    u.file.close()
+                    recs = normalize_csv_text(raw, sample_lines=200)
+                    for r in recs:
+                        records.append({'customer_id': r.get('customer_id'), 'mrr': r.get('mrr') or 0, 'signup_date': r.get('signup_date')})
+                except Exception:
+                    continue
+            kpis = compute_mrr_and_arr(records) if records else {'MRR': 0.0, 'ARR': 0.0}
+            tops = top_customers_by_mrr(records, limit=10) if records else []
+
+        # Normalize matrix to JSON friendly shape: keys as 'YYYY-MM'
+        cohorts_out = {f"{y:04d}-{m:02d}": v for (y, m), v in cohorts.items()}
+        matrix_out = {f"{y:04d}-{m:02d}": row for (y, m), row in matrix.items()}
+
+        return Response({
+            'arr_kpis': kpis,
+            'top_customers': tops,
+            'cohorts': cohorts_out,
+            'retention_matrix': matrix_out,
+        }, status=status.HTTP_200_OK)
+
+
+# --- Automations API (MVP) ---
+class AutomationListCreateAPIView(ListCreateAPIView):
+    serializer_class = AutomationSerializer
+    permission_classes = [IsAuthenticated]
+    authentication_classes = [CookieTokenAuthentication]
+
+    def get_queryset(self):
+        profile = getattr(self.request.user, 'profile', None)
+        if profile and profile.org:
+            return Automation.objects.filter(org=profile.org).order_by('-updated_at')
+        return Automation.objects.none()
+
+    def perform_create(self, serializer):
+        profile = getattr(self.request.user, 'profile', None)
+        if not profile or not profile.org:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('User must belong to an organization to create automations.')
+        org = profile.org
+        # For MVP: accept natural_language and attempt best-effort parse into actions
+        obj = serializer.save(created_by=self.request.user, org=org)
+        logger.info('Created automation %s for org %s', obj.pk, org)
+
+
+class AutomationDetailAPIView(RetrieveUpdateDestroyAPIView):
+    serializer_class = AutomationSerializer
+    permission_classes = [IsAuthenticated]
+    authentication_classes = [CookieTokenAuthentication]
+
+    def get_queryset(self):
+        profile = getattr(self.request.user, 'profile', None)
+        if profile and profile.org:
+            return Automation.objects.filter(org=profile.org)
+        return Automation.objects.none()
+
+
+class AutomationRunAPIView(APIView):
+    """Trigger an automation run (enqueues a Celery task)."""
+    permission_classes = [IsAuthenticated]
+    authentication_classes = [CookieTokenAuthentication]
+
+    def post(self, request, pk):
+        profile = getattr(request.user, 'profile', None)
+        if not profile or not profile.org:
+            return Response({'error': 'User must belong to an organization'}, status=status.HTTP_403_FORBIDDEN)
+        auto = Automation.objects.filter(pk=pk, org=profile.org).first()
+        if not auto:
+            return Response({'error': 'automation not found'}, status=status.HTTP_404_NOT_FOUND)
+        # Enqueue Celery task if available
+        try:
+            from .tasks import automation_execute_task
+        except Exception:
+            automation_execute_task = None
+
+        if automation_execute_task is not None and hasattr(automation_execute_task, 'delay'):
+            try:
+                automation_execute_task.delay(auto.pk, triggered_by=request.user.pk)
+                return Response({'ok': True, 'message': 'enqueued'}, status=status.HTTP_202_ACCEPTED)
+            except Exception as e:
+                logger.exception('failed to enqueue automation')
+
+        # Fallback: run synchronously (best-effort)
+        try:
+            from .tasks import _execute_automation_sync
+            exec_result = _execute_automation_sync(auto.pk)
+            return Response({'ok': True, 'result': exec_result}, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.exception('failed to run automation sync')
+            return Response({'error': 'failed to run automation'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

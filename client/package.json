@@ -17,6 +17,7 @@
     "date-fns": "^2.30.0",
     "firebase": "^12.4.0",
     "framer-motion": "^12.23.24",
+    "html2canvas": "^1.4.1",
     "lucide-react": "^0.545.0",
     "react": "^19.2.0",
     "react-chartjs-2": "^5.3.0",
@@ -30,6 +31,9 @@
     "start": "react-scripts start",
     "build": "react-scripts build",
     "test": "react-scripts test",
+    "test:e2e": "npx playwright test",
+    "e2e:install-browsers": "npx playwright install --with-deps",
+    "e2e:serve": "npx serve -s build -l 3000",
     "eject": "react-scripts eject"
   },
   "eslintConfig": {
@@ -51,8 +55,10 @@
     ]
   },
   "devDependencies": {
+    "@playwright/test": "^1.56.1",
     "@tailwindcss/postcss": "^4.1.14",
     "autoprefixer": "^10.4.21",
+    "playwright": "^1.44.0",
     "postcss": "^8.5.6",
     "tailwindcss": "^3.4.18"
   }

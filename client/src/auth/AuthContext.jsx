@@ -23,8 +23,33 @@ export const AuthProvider = ({ children }) => {
 
   useEffect(() => { refresh(); }, [refresh]);
 
+  // Listen for global auth-changed events so other parts of the app (or the
+  // low-level auth helper) can notify this provider when login/logout occurs.
+  // Some code dispatches a CustomEvent with detail:{user}, other places may
+  // dispatch a plain Event — handle both cases.
+  useEffect(() => {
+    const handler = (ev) => {
+      try {
+        const userFromDetail = ev && ev.detail && Object.prototype.hasOwnProperty.call(ev.detail, 'user') ? ev.detail.user : undefined;
+        if (typeof userFromDetail !== 'undefined') {
+          setUser(userFromDetail || null);
+          setLoading(false);
+        } else {
+          // fallback: re-run a full refresh which calls /api/me
+          refresh();
+        }
+      } catch (e) {
+        // ignore handler errors
+        refresh();
+      }
+    };
+    window.addEventListener('jarvis:auth-changed', handler);
+    return () => { window.removeEventListener('jarvis:auth-changed', handler); };
+  }, [refresh]);
+
   const login = useCallback(async (credentials) => {
-    const resp = await auth.login(credentials.username, credentials.password);
+    // auth.login expects an object { username, password, use_cookie }
+    const resp = await auth.login(credentials);
     // after login, refresh
     await refresh();
     return resp;

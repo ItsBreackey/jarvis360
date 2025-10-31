@@ -149,7 +149,15 @@ npx playwright test
 ```
 
 - CI notes:
-   - A GitHub Actions workflow `.github/workflows/playwright.yml` is included to run Playwright E2E on pushes/PRs to `master`. It builds the client, starts a static server on `:3000`, runs Django on `:8000`, and executes Playwright tests (Chromium-only by default in the config).
+   - A GitHub Actions workflow `.github/workflows/e2e-playwright.yml` was added and configured to run Playwright E2E on pushes/PRs to `master`. It builds the client, starts a static server on `:3000`, runs Django on `:8000`, and executes Playwright tests (Chromium-only by default in the config).
+
+Status (2025-10-18)
+------------------
+
+- The cookie-based browser auth flows (register/login-cookie/logout/me) were implemented and hardened. Server-side cookie attributes (SameSite/Secure/Domain) are configurable via settings/env (e.g. `JARVIS_COOKIE_SAMESITE`, `JARVIS_COOKIE_SECURE`, `JARVIS_COOKIE_DOMAIN`).
+- Playwright E2E tests were converted to use UI-first flows (no programmatic cookie injection), updated to include credentials on page-side fetches, and made deterministic by seeding localStorage and intercepting demo CSV uploads.
+- Playwright was run locally with tracing: tests passed and traces show the browser receiving Set-Cookie headers and sending Cookie headers on subsequent API requests.
+- A CI workflow `.github/workflows/e2e-playwright.yml` was added and pushed to `master`; it sets cookie env vars (SameSite=None & Secure=true) to allow cross-site cookie behavior in CI.
 
    Local auto-run helper
    ---------------------

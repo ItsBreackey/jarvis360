@@ -37,12 +37,24 @@ test('register -> login via API cookies -> upload -> save scenario -> server has
   if (autoStart) {
     // start Django
     djangoProc = spawn(process.platform === 'win32' ? 'python' : 'python3', ['manage.py', 'runserver', '127.0.0.1:8000'], { cwd: repoRoot, shell: true, env: process.env });
-    djangoProc.stdout && djangoProc.stdout.on('data', (d) => console.log('[django]', d.toString().trim()));
-    djangoProc.stderr && djangoProc.stderr.on('data', (d) => console.error('[django]', d.toString().trim()));
+    try {
+      const djangoLog = fs.createWriteStream(path.join(repoRoot, 'client', 'test-results', 'django.log'), { flags: 'a' });
+      djangoProc.stdout && djangoProc.stdout.pipe(djangoLog);
+      djangoProc.stderr && djangoProc.stderr.pipe(djangoLog);
+    } catch (e) {
+      djangoProc.stdout && djangoProc.stdout.on('data', (d) => console.log('[django]', d.toString().trim()));
+      djangoProc.stderr && djangoProc.stderr.on('data', (d) => console.error('[django]', d.toString().trim()));
+    }
     // start static server for client build
     clientProc = spawn(process.platform === 'win32' ? 'npx.cmd' : 'npx', ['serve', '-s', 'build', '-l', '3000'], { cwd: clientDir, shell: true, env: process.env });
-    clientProc.stdout && clientProc.stdout.on('data', (d) => console.log('[serve]', d.toString().trim()));
-    clientProc.stderr && clientProc.stderr.on('data', (d) => console.error('[serve]', d.toString().trim()));
+    try {
+      const serveLog = fs.createWriteStream(path.join(clientDir, 'test-results', 'serve.log'), { flags: 'a' });
+      clientProc.stdout && clientProc.stdout.pipe(serveLog);
+      clientProc.stderr && clientProc.stderr.pipe(serveLog);
+    } catch (e) {
+      clientProc.stdout && clientProc.stdout.on('data', (d) => console.log('[serve]', d.toString().trim()));
+      clientProc.stderr && clientProc.stderr.on('data', (d) => console.error('[serve]', d.toString().trim()));
+    }
   }
 
   const apiReady = await waitForApi(60000);
@@ -200,7 +212,10 @@ test('register -> login via API cookies -> upload -> save scenario -> server has
   const loadedText = await page.locator('text=Loaded').first().innerText().catch(() => null);
   if (!loadedText) {
     // fallback to demo load which doesn't rely on file parsing/mapping
-    await page.click('#load-demo-btn').catch(() => null);
+    const loadDemoBtn = page.locator('#load-demo-btn');
+    if ((await loadDemoBtn.count()) > 0) {
+      try { await loadDemoBtn.click(); } catch (e) { /* ignore */ }
+    }
     // wait for Scenarios to be populated: the Scenarios view shows "No customer data loaded." when empty
     try {
       await page.waitForSelector('text=No customer data loaded.', { state: 'hidden', timeout: 5000 });
@@ -345,12 +360,15 @@ test('register -> login via API cookies -> upload -> save scenario -> server has
     }
   }
 
-  // Wait until the button is enabled (not disabled attribute)
+  // Wait until the button is visible and enabled using Playwright locators
   if (!usedFallbackSave) {
+    const saveBtnLocator = page.locator('button[aria-label="Save scenario"]').first();
+    await saveBtnLocator.waitFor({ state: 'visible', timeout: 30000 });
+    // Ensure the button is not disabled (polling via page.waitForFunction)
     await page.waitForFunction((sel) => {
       const btn = document.querySelector(sel);
       return !!btn && !btn.disabled;
-    }, 'button[aria-label="Save scenario"]');
+    }, 'button[aria-label="Save scenario"]', { timeout: 30000 });
   } else {
     console.log('Used fallback save; skipping wait for Save button enabled state');
   }

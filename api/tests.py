@@ -50,7 +50,7 @@ class APIPersistenceTests(TestCase):
 		self.password = 's3cret!'
 		# Create a user via register endpoint to simulate real flow
 		self.client = Client()
-		resp = self.client.post('/api/register/', {'username': self.username, 'password': self.password, 'org_name': 'APITestOrg'})
+		resp = self.client.post('/api/register/', {'username': self.username, 'password': self.password, 'org_name': 'APITestOrg', 'email': f'{self.username}@example.com'})
 		self.assertEqual(resp.status_code, 201)
 		data = resp.json()
 		self.token = data.get('token')
@@ -80,7 +80,7 @@ class APIPersistenceTests(TestCase):
 		username = 'flowuser'
 		password = 'flowpass'
 		org_name = 'FlowOrg'
-		resp = self.client.post('/api/register/', {'username': username, 'password': password, 'org_name': org_name}, content_type='application/json')
+		resp = self.client.post('/api/register/', {'username': username, 'password': password, 'org_name': org_name, 'email': f'{username}@example.com'}, content_type='application/json')
 		self.assertEqual(resp.status_code, 201)
 		token = resp.json().get('token')
 		self.assertTrue(token)
@@ -133,13 +133,13 @@ class APIPersistenceTests(TestCase):
 	def test_tenant_isolation(self):
 		# Create user A (org A)
 		c = Client()
-		r1 = c.post('/api/register/', {'username': 'userA', 'password': 'pwA', 'org_name': 'OrgA'})
+		r1 = c.post('/api/register/', {'username': 'userA', 'password': 'pwA', 'org_name': 'OrgA', 'email': 'userA@example.com'})
 		self.assertEqual(r1.status_code, 201)
 		tokenA = r1.json().get('token')
 		hA = {'HTTP_AUTHORIZATION': f'Token {tokenA}'}
 
 		# Create user B (org B)
-		r2 = c.post('/api/register/', {'username': 'userB', 'password': 'pwB', 'org_name': 'OrgB'})
+		r2 = c.post('/api/register/', {'username': 'userB', 'password': 'pwB', 'org_name': 'OrgB', 'email': 'userB@example.com'})
 		self.assertEqual(r2.status_code, 201)
 		tokenB = r2.json().get('token')
 		hB = {'HTTP_AUTHORIZATION': f'Token {tokenB}'}
@@ -161,4 +161,75 @@ class APIPersistenceTests(TestCase):
 		listB_dash = c.get('/api/dashboards/', **hB)
 		self.assertEqual(listB_dash.status_code, 200)
 		self.assertFalse(any(d.get('id') == dashA.get('id') for d in listB_dash.json()))
+
+	def test_public_dashboard_by_slug(self):
+		# Create a dashboard and make it public, then fetch by slug without auth
+		payload = {'name': 'PublicDash', 'config': {'a': 1}}
+		resp = self.client.post('/api/dashboards/', data=json.dumps(payload), content_type='application/json', **self.auth_headers)
+		self.assertEqual(resp.status_code, 201)
+		created = resp.json()
+		dash_id = created.get('id')
+		# Make public via PATCH
+		r2 = self.client.patch(f'/api/dashboards/{dash_id}/', data=json.dumps({'visibility': 'public'}), content_type='application/json', **self.auth_headers)
+		self.assertIn(r2.status_code, (200, 202))
+		# Fetch by slug anonymously
+		slug = created.get('slug')
+		anon = Client()
+		r3 = anon.get(f'/api/dashboards/slug/{slug}/')
+		self.assertEqual(r3.status_code, 200)
+
+	def test_only_owner_can_change_visibility(self):
+		# Create second user
+		c = Client()
+		r = c.post('/api/register/', {'username': 'other', 'password': 'pw', 'org_name': 'OtherOrg', 'email': 'other@example.com'})
+		self.assertEqual(r.status_code, 201)
+		other_token = r.json().get('token')
+		h = {'HTTP_AUTHORIZATION': f'Token {other_token}'}
+		# Create a dashboard with first user
+		payload = {'name': 'PrivateDash', 'config': {}}
+		resp = self.client.post('/api/dashboards/', data=json.dumps(payload), content_type='application/json', **self.auth_headers)
+		self.assertEqual(resp.status_code, 201)
+		d = resp.json()
+		# Attempt to change visibility as other user
+		r2 = c.patch(f"/api/dashboards/{d.get('id')}/", data=json.dumps({'visibility': 'public'}), content_type='application/json', **h)
+		# Should be forbidden (403) or not allowed
+		self.assertIn(r2.status_code, (403, 404))
+
+
+	class AutomationSmokeTest(TestCase):
+		def test_execute_automation_creates_execution(self):
+			from django.contrib.auth import get_user_model
+			from .models import Organization, Automation, AutomationExecution
+			from .tasks import _execute_automation_sync
+
+			# Create organization and user
+			org = Organization.objects.create(name='Test Org', slug='test-org-smoke')
+			User = get_user_model()
+			user = User.objects.create_user(username='testuser_smoke', email='t@example.com', password='pass')
+
+			# Attach profile org if profile exists
+			prof = getattr(user, 'profile', None)
+			if prof:
+				prof.org = org
+				prof.save()
+
+			actions = [
+				{'name': 'generate_report'},
+				{'name': 'send_email'},
+				{'name': 'unknown_action'},
+			]
+			auto = Automation.objects.create(org=org, name='Test Auto', natural_language='Smoke test', actions=actions, created_by=user)
+
+			result = _execute_automation_sync(auto.pk)
+			self.assertTrue(result.get('ok'), msg=f"Expected ok result, got: {result}")
+
+			execs = AutomationExecution.objects.filter(automation=auto)
+			self.assertEqual(execs.count(), 1)
+			e = execs.first()
+			self.assertTrue(e.success)
+			self.assertIn('results', e.result)
+
+			auto.refresh_from_db()
+			self.assertIsNotNone(auto.last_run)
+			self.assertEqual(e.finished_at, auto.last_run)
 

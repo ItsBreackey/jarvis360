@@ -21,10 +21,17 @@ const LoginPage = () => {
         const meAfter = await auth.me();
         console.debug('auth.me() after login ->', meAfter);
       } catch (e) { console.debug('me() check after login failed', e); }
-      // notify app and redirect to dashboard
+      // notify app and redirect to the return target (if provided) or dashboard
       window.dispatchEvent(new Event('jarvis:auth-changed'));
-      // attempt programmatic navigation; also set a redirect flag as a fallback
-      try { navigate('/dashboard/home', { replace: true }); } catch (e) { /* ignore */ }
+      // determine return target: prefer state.returnTo, then sessionStorage, else dashboard
+      let returnTo = null;
+      try {
+        const st = window.history && window.history.state && window.history.state && window.history.state.usr ? window.history.state.usr : null;
+        // prefer navigation state (React Router passes state in location.state but we can't access it here easily)
+        // fallback to sessionStorage set by ShareView
+        returnTo = (st && st.returnTo) || sessionStorage.getItem('jarvis_return_to') || null;
+      } catch (e) { returnTo = null; }
+      try { if (returnTo) { sessionStorage.removeItem('jarvis_return_to'); navigate(returnTo, { replace: true }); } else { navigate('/dashboard/home', { replace: true }); } } catch (e) { /* ignore */ }
       setRedirect(true);
     } catch (err) {
       console.error('Login failed', err);
@@ -37,7 +44,12 @@ const LoginPage = () => {
     (async () => {
       const u = await auth.me();
       if (!mounted) return;
-      if (u) navigate('/dashboard/home', { replace: true });
+      if (u) {
+        // if a return target was stored (share link -> login), honor it
+        const returnTo = sessionStorage.getItem('jarvis_return_to');
+        try { if (returnTo) { sessionStorage.removeItem('jarvis_return_to'); navigate(returnTo, { replace: true }); return; } } catch (e) {}
+        navigate('/dashboard/home', { replace: true });
+      }
     })();
     return () => { mounted = false; };
   }, [navigate]);

@@ -1,0 +1,20 @@
+.upload-status { padding: 8px; font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; }
+.upload-status--error { background: #fff5f5; border: 1px solid #f5c6cb; }
+
+.upload-error { margin-top: 8px; }
+.upload-error-row { display: flex; gap: 8px; align-items: center; }
+.upload-error-message { flex: 1; color: #600; }
+.upload-error-actions { display: flex; gap: 8px; }
+.upload-error-btn { padding: 6px 10px; border-radius: 4px; border: 1px solid #ccc; background: white; cursor: pointer; }
+.upload-error-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.upload-error-cooldown { min-width: 80px; color: #666; }
+.upload-error-pre { max-height: 300px; overflow: auto; white-space: pre-wrap; background: #fff8f8; padding: 8px; border: 1px solid #f0dcdc; margin-top: 8px; }
+
+.upload-cooldown { margin-top: 6px; color: #333; font-size: 0.9em; }
+
+.upload-cooldown-row { display:flex; gap:8px; align-items:center }
+.upload-cooldown-label { font-weight:600; margin-right:8px }
+.upload-cooldown-bar { flex: 1; height:10px; background:#eee; border-radius:6px; overflow:hidden }
+.upload-cooldown-bar-fill { height:100%; background:linear-gradient(90deg,#6aa84f,#6aa84f); transition: width 0.3s linear }
+.upload-cooldown-time { min-width:48px; text-align:right; font-variant-numeric: tabular-nums }
+.upload-cooldown-until { margin-left:12px; color:#666; font-size:0.85em }

@@ -1,5 +1,6 @@
 import environ
 import os
+import logging
 from pathlib import Path
 
 # Base directory of your project (two levels up from settings.py)
@@ -12,6 +13,10 @@ env = environ.Env()
 env_file = os.path.join(BASE_DIR, '.env')  
 
 if os.path.exists(env_file):
+    # django-environ may warn about malformed lines in .env files which prints
+    # as 'Invalid line: ...'. For developer demo scripts we prefer to keep
+    # stdout clean, so raise the module logger to ERROR level before reading.
+    logging.getLogger('environ.environ').setLevel(logging.ERROR)
     environ.Env.read_env(env_file)
 else:
     raise FileNotFoundError(f".env file not found at {env_file}")
@@ -26,8 +31,21 @@ if not SECRET_KEY:
 DEBUG = env.bool('DEBUG', default=True)
 
 ALLOWED_HOSTS = env.list('ALLOWED_HOSTS', default=[
-    'localhost', '127.0.0.1'
+    'localhost', '127.0.0.1', 'testserver'
 ])
+
+# When developing with Django's test client (or local dev servers) it's common
+# for the HTTP_HOST to be 'testserver'. If ALLOWED_HOSTS is provided from the
+# environment it may not include that value. To avoid DisallowedHost during
+# local tests and demos, ensure 'testserver' is present when DEBUG is enabled.
+if DEBUG:
+    # Coerce to list (env.list may return list-like already) and append if
+    # missing. This keeps the change local to development only.
+    try:
+        if 'testserver' not in ALLOWED_HOSTS:
+            ALLOWED_HOSTS = list(ALLOWED_HOSTS) + ['testserver']
+    except Exception:
+        ALLOWED_HOSTS = ['testserver']
 
 
 # Application definition
@@ -170,3 +188,21 @@ REST_FRAMEWORK = {
     # can introspect the API without raising "Incompatible AutoSchema" errors.
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
 }
+
+# Celery configuration
+# Broker URL (default to local Redis if not provided)
+CELERY_BROKER_URL = env('CELERY_BROKER_URL', default='redis://localhost:6379/0')
+# Default to an in-memory cache backend for results when not explicitly set so
+# local development and eager-mode testing don't force installing redis.
+CELERY_RESULT_BACKEND = env('CELERY_RESULT_BACKEND', default='cache+memory://')
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+
+# When developing without a broker (Redis), allow running Celery tasks eagerly
+# (synchronously) by setting environment variables:
+#   CELERY_TASK_ALWAYS_EAGER=true
+#   CELERY_TASK_EAGER_PROPAGATES=true
+CELERY_TASK_ALWAYS_EAGER = env.bool('CELERY_TASK_ALWAYS_EAGER', default=False)
+CELERY_TASK_EAGER_PROPAGATES = env.bool('CELERY_TASK_EAGER_PROPAGATES', default=False)
+

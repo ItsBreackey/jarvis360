@@ -112,9 +112,12 @@ ehthumbs.db
 # Project-specific data / artifacts
 #########################
 datasets/
-docs/plannin.ipynb
+docs/codesaver.ipynb
 docs/churn.csv
 docs/ecomerce_dataset.csv
+docs/saas.csv
+docs/jarvis360_planning.txt
+docs/jArvIs360_plan.docx
 
 # keep media ignored (local uploads)
 media/

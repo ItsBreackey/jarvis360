@@ -5,3 +5,36 @@
 @tailwind utilities;
 
 /* You can add any custom CSS below here */
+
+/* Upload status poller styles */
+.upload-status {
+	@apply p-3 rounded-md border shadow-sm text-sm bg-white;
+}
+.upload-status--pending {
+	@apply border-gray-200 text-gray-700;
+}
+.upload-status--importing {
+	@apply border-blue-300 text-blue-800 bg-blue-50;
+}
+.upload-status--complete {
+	@apply border-green-300 text-green-800 bg-green-50;
+}
+.upload-status--error {
+	@apply border-red-300 text-red-800 bg-red-50;
+}
+.upload-status .upload-error {
+	@apply mt-2 text-sm text-red-700;
+}
+
+/* Small helper spacing for the upload area */
+.upload-status + * {
+	margin-top: 0.75rem;
+}
+
+/* Smooth visibility transition when the poller appears */
+.upload-status {
+	transition: opacity 220ms ease, transform 220ms ease;
+}
+.upload-status.hidden {
+	opacity: 0; transform: translateY(-4px);
+}

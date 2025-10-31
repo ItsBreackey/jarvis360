@@ -1,0 +1,55 @@
+name: Celery + Redis smoke test
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'api/**'
+      - 'jarvis360/**'
+      - '.github/workflows/ci_celery_smoke.yml'
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt
+      - name: Run migrations
+        run: python manage.py migrate --noinput
+      - name: Start Celery worker in background
+        run: |
+          celery -A jarvis360 worker -l info &
+          sleep 5
+      - name: Create an UploadedCSV and assert import
+        run: |
+          python - <<'PY'
+          from api.models import Organization, UploadedCSV
+          from django.contrib.auth import get_user_model
+          from django.core.files.base import ContentFile
+          User = get_user_model()
+          org = Organization.objects.create(name='ACME', slug='acme')
+          u = User.objects.create_user(username='t', password='p')
+          f = ContentFile(b'customer_id,mrr,signup_date\n1,100,2020-01-01')
+          f.name = 'smoke.csv'
+          upload = UploadedCSV.objects.create(org=org, uploaded_by=u, file=f, filename='smoke.csv')
+          print('created upload', upload.pk)
+          # Wait a bit for worker to pick up
+          import time
+          time.sleep(5)
+          from api.models import Subscription
+          subs = Subscription.objects.filter(source_upload=upload)
+          print('found', subs.count(), 'subscriptions')
+          if subs.count() == 0:
+              raise SystemExit('No subscriptions created')
+          PY

@@ -242,10 +242,11 @@ Recommendations — prioritized (top → bottom)
 Critical / High ROI (low risk, small effort)
 Add chart-specific refs for reliable export/copy targets
 
-Why: current export code queries the DOM for the first .recharts-wrapper svg. That can pick the wrong chart if multiple charts exist.
-What to do: add React refs to the Forecast and Simulation chart containers and pass those refs to exportSvgToPng / copySvgToClipboard.
-Risk: tiny. Effort: ~20–40 min.
-Benefit: reliable exports for each chart.
+Why: chart export and copy helpers now accept a DOM container node (via a React ref). Using refs ensures the correct chart container element is targeted for export/copy even when multiple charts exist on the page.
+What to do: ensure chart container refs (for example `forecastChartRef` and `simulationChartRef`) are passed into pages and attached to the chart container div; use those refs when calling export/copy helpers.
+Risk: tiny. Effort: ~10–30 min.
+Benefit: reliable, deterministic exports for each chart and no brittle DOM queries.
+Note: export helpers (exportElementToPng / copyElementToClipboard) expect a DOM container supplied via a `chartRef` prop or a forwarded ref; also, saved scenarios are canonicalized by `client/src/utils/scenarioPersistence.js` — use `readSavedScenarios()` and `mergeAndPersistScenarios()` to avoid optimistic-save vs server-confirm races.
 Wrap showCustomModal in useCallback
 
 Why: reduces needless re-renders / keeps downstream useCallback stable (React rule-of-hooks warning showed this).
@@ -317,6 +318,14 @@ Add React refs to Forecast and Simulation charts.
 Use those refs for Download Image and Copy Image buttons instead of querySelector.
 Also update buttons’ aria-label and disabled state when ref not ready.
 Estimated time: 20–40 minutes. Low risk.
+Planner example (tiny):
+
+```javascript
+// quick planner example — call from UI handler to persist a scenario
+import { mergeAndPersistScenarios } from 'client/src/utils/scenarioPersistence';
+mergeAndPersistScenarios([{ id: 'opt-PLN-1', title: 'Planner sample', payload: {}, updatedAt: Date.now() }], 'planner-sample');
+// see docs/operational_notes.md -> "Usage examples (quick)" for full snippets
+```
 
 
 Data to implement for SaaS
@@ -446,3 +455,29 @@ Sample edge-case unit tests to add
 Single customer MRR aggregation over months.
 Churn rate when one customer churns mid-month.
 NRR calculation when expansion equals churn.
+
+---
+
+## Current status (implementation snapshot)
+
+This appendix summarizes the current implementation state and points to two small supporting docs added alongside this planning doc:
+
+- `docs/flows.md` — describes the canonical client-side flows (scenario persistence, autosave/restore, cross-tab sync, import/export, forecast/AI job lifecycle) and recommended failure modes/UX.
+- `docs/operational_notes.md` — short reference for keys, custom events, merge/persistence helper usage, and recommended tests.
+
+High-level implemented pieces (as of branch `master`):
+
+- Centralized scenario persistence and merge helper: `client/src/utils/scenarioPersistence.js` (merge-by-canonical-key, cap list, instrumentation).
+- What‑If optimistic-save + server-confirm merge flow: `client/src/pages/WhatIfSimulation.jsx`.
+- Churn estimator utility and reuse: `client/src/utils/churn.js`, `client/src/components/ChurnPreview.jsx`, `client/src/components/ExpandedChurnAnalysis.jsx`.
+- Share & read-only views updated to use canonical merge writer.
+- Autosave draft keys and cross-tab sync events implemented (see `docs/operational_notes.md` for keys/events).
+
+Remaining priorities (short):
+
+- Add chart refs and fix export selection to avoid DOM query ambiguity.
+- Add unit tests for churn blending and persistence merge behavior.
+- Implement robust CSV header mapping and web worker parsing for large files.
+- Plan server-backed snapshot persistence & authentication (Firestore or REST API).
+
+For the authoritative flows and event/keys reference see `docs/flows.md` and `docs/operational_notes.md`.

@@ -1,0 +1,17 @@
+sequenceDiagram
+    participant FE as Frontend
+    participant API as Backend API
+    participant IMP as Importer (sync/Celery)
+    participant DB as Database
+
+    FE->>API: POST /api/overview/ (file)
+    API-->>FE: preview (stats + sample)
+    FE->>API: POST /api/uploads/ (file)
+    API->>DB: save UploadedCSV
+    API->>IMP: enqueue/import(uploaded_csv_id)
+    IMP->>API: read file & normalize
+    IMP->>DB: create Customer, Subscription
+    FE->>API: GET /api/arr-summary/
+    API->>DB: read Subscriptions
+    API->>API: compute ARR/cohorts
+    API-->>FE: JSON (arr_kpis, cohorts, retention_matrix)
