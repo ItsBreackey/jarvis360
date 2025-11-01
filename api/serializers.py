@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from drf_spectacular.utils import extend_schema_field, OpenApiTypes
 from .models import Organization, UploadedCSV, Dashboard
 from .models import Automation, AutomationExecution
 
@@ -40,6 +41,8 @@ class DashboardSerializer(serializers.ModelSerializer):
         # org and created_by are assigned by the server during creation
         read_only_fields = ['org', 'created_by', 'created_at', 'updated_at']
 
+    # Provide an explicit OpenAPI field for the owner object returned by get_owner
+    @extend_schema_field(OpenApiTypes.OBJECT)
     def get_owner(self, obj):
         user = getattr(obj, 'created_by', None)
         if not user:
@@ -49,6 +52,8 @@ class DashboardSerializer(serializers.ModelSerializer):
         except Exception:
             return None
 
+    # Provide an explicit OpenAPI field for owner_name (string)
+    @extend_schema_field(OpenApiTypes.STR)
     def get_owner_name(self, obj):
         user = getattr(obj, 'created_by', None)
         if not user:
@@ -65,6 +70,7 @@ class DashboardSerializer(serializers.ModelSerializer):
         return getattr(user, 'username', None)
 
 
+
 class AutomationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Automation
@@ -77,3 +83,79 @@ class AutomationExecutionSerializer(serializers.ModelSerializer):
         model = AutomationExecution
         fields = ['id', 'automation', 'started_at', 'finished_at', 'success', 'result']
         read_only_fields = ['started_at']
+
+
+class InsightsSerializer(serializers.Serializer):
+    """Serializer for the insights/arr-summary output.
+
+    Fields mirror the response from `ARRSummaryAPIView`:
+        - arr_kpis: dict with 'MRR' and 'ARR'
+        - top_customers: list of dicts
+        - cohorts: dict
+        - retention_matrix: dict
+    """
+    arr_kpis = serializers.DictField(child=serializers.FloatField(), required=True)
+    top_customers = serializers.ListField(child=serializers.DictField(), required=True)
+    cohorts = serializers.DictField(child=serializers.ListField(child=serializers.IntegerField()), required=False)
+    retention_matrix = serializers.DictField(child=serializers.DictField(), required=False)
+
+
+class OverviewResponseSerializer(serializers.Serializer):
+    summary = serializers.CharField()
+    stats = serializers.DictField(child=serializers.DictField(), required=False)
+    sample_chart = serializers.ListField(child=serializers.DictField(), required=False)
+
+
+class SimulationResponseSerializer(serializers.Serializer):
+    summary = serializers.CharField()
+    base_metric_name = serializers.CharField()
+
+
+class AutomationEnqueuedSerializer(serializers.Serializer):
+    ok = serializers.BooleanField()
+    message = serializers.CharField()
+
+
+class AutomationExecutedSerializer(serializers.Serializer):
+    ok = serializers.BooleanField()
+    result = serializers.DictField(child=serializers.DictField(), required=False)
+
+
+class UploadedCSVReimportResponseSerializer(serializers.Serializer):
+    ok = serializers.BooleanField()
+    message = serializers.CharField(required=False)
+    created = serializers.IntegerField(required=False)
+    subscriptions_created = serializers.IntegerField(required=False)
+
+
+class ForecastResponseSerializer(serializers.Serializer):
+    summary = serializers.CharField()
+    forecast = serializers.ListField(child=serializers.DictField())
+
+
+class SimpleOkSerializer(serializers.Serializer):
+    ok = serializers.BooleanField()
+    message = serializers.CharField(required=False)
+
+
+class LoginResponseSerializer(serializers.Serializer):
+    username = serializers.CharField()
+
+
+class RegisterResponseSerializer(serializers.Serializer):
+    token = serializers.CharField()
+    username = serializers.CharField()
+    email = serializers.EmailField()
+
+
+class PasswordResetRequestResponseSerializer(serializers.Serializer):
+    ok = serializers.BooleanField()
+    reset_url = serializers.CharField(required=False, allow_null=True)
+
+
+class PasswordResetConfirmResponseSerializer(serializers.Serializer):
+    ok = serializers.BooleanField()
+
+
+class MeResponseSerializer(serializers.Serializer):
+    user = serializers.DictField(child=serializers.CharField(), required=False)

@@ -8,16 +8,16 @@ from .views import (
     DashboardListCreateAPIView,
     DashboardDetailAPIView,
     PublicDashboardRetrieveAPIView,
-    register_user,
+    RegisterUserView,
     ARRSummaryAPIView,
     AutomationListCreateAPIView,
     AutomationDetailAPIView,
     AutomationRunAPIView,
 )
 from rest_framework.authtoken import views as drf_views
-from .views import login_cookie, logout_cookie, me, password_reset_request, password_reset_confirm
+from .views import PasswordResetRequestView, PasswordResetConfirmView
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
-from .views import jwt_refresh_cookie, jwt_logout
+from .views import JwtRefreshCookieView, JwtLogoutView, LoginCookieView, LogoutCookieView, MeView
 
 urlpatterns = [
     # Existing forecast app
@@ -37,16 +37,18 @@ urlpatterns = [
 
     # Auth endpoints
     path('token-auth/', drf_views.obtain_auth_token, name='api-token-auth'),
-    path('register/', register_user, name='register'),
+    path('register/', RegisterUserView.as_view(), name='register'),
     # cookie-based helpers
-    path('login-cookie/', login_cookie, name='login-cookie'),
-    path('logout-cookie/', logout_cookie, name='logout-cookie'),
-    path('me/', me, name='me'),
-    path('password-reset/', password_reset_request, name='password-reset-request'),
-    path('password-reset/confirm/', password_reset_confirm, name='password-reset-confirm'),
-    path('token/refresh-cookie/', jwt_refresh_cookie, name='jwt-refresh-cookie'),
-    path('token/logout/', jwt_logout, name='jwt-logout'),
+    path('login-cookie/', LoginCookieView.as_view(), name='login-cookie'),
+    path('logout-cookie/', LogoutCookieView.as_view(), name='logout-cookie'),
+    path('me/', MeView.as_view(), name='me'),
+    path('password-reset/', PasswordResetRequestView.as_view(), name='password-reset-request'),
+    path('password-reset/confirm/', PasswordResetConfirmView.as_view(), name='password-reset-confirm'),
+    path('token/refresh-cookie/', JwtRefreshCookieView.as_view(), name='jwt-refresh-cookie'),
+    path('token/logout/', JwtLogoutView.as_view(), name='jwt-logout'),
     path('arr-summary/', ARRSummaryAPIView.as_view(), name='arr-summary'),
+    # Insights alias (keeps API semantics clear for frontend)
+    path('insights/', ARRSummaryAPIView.as_view(), name='insights'),
     # Automations (MVP)
     path('automations/', AutomationListCreateAPIView.as_view(), name='automations'),
     path('automations/<int:pk>/', AutomationDetailAPIView.as_view(), name='automation-detail'),
