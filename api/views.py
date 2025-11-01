@@ -6,11 +6,14 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView, RetrieveAPIView
+from rest_framework.generics import ListCreateAPIView, RetrieveUpdateDestroyAPIView, RetrieveAPIView, GenericAPIView
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.authentication import TokenAuthentication
 from .serializers import UploadedCSVSerializer, DashboardSerializer
-from .serializers import AutomationSerializer, AutomationExecutionSerializer
+from .serializers import AutomationSerializer, AutomationExecutionSerializer, InsightsSerializer
+from .serializers import OverviewResponseSerializer, SimulationResponseSerializer, AutomationEnqueuedSerializer, AutomationExecutedSerializer, UploadedCSVReimportResponseSerializer
+from .serializers import SimpleOkSerializer, LoginResponseSerializer, RegisterResponseSerializer, PasswordResetRequestResponseSerializer, PasswordResetConfirmResponseSerializer, MeResponseSerializer
+from drf_spectacular.utils import extend_schema, OpenApiExample
 from .models import Automation, AutomationExecution
 from .models import UploadedCSV, Dashboard, Organization, Subscription
 from .importer import import_single_upload
@@ -31,6 +34,12 @@ from django.conf import settings
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from django.utils.encoding import force_bytes, force_str
 from django.contrib.auth.tokens import PasswordResetTokenGenerator
+
+# Expose a module-level symbol that tests can patch (`api.views.automation_execute_task`).
+# Do not import the real tasks module at import time here to avoid initializing Celery/kombu
+# during lightweight test runs. The actual resolution is performed at request time and
+# will prefer an already-imported `api.tasks` module when present.
+automation_execute_task = None
 
 User = get_user_model()
 
@@ -115,10 +124,23 @@ def analyze_dataframe(df):
 
 # --- API Views ---
 
-class OverviewAPIView(APIView):
+class OverviewAPIView(GenericAPIView):
     """
     Receives a CSV file and returns descriptive statistics and a chart sample.
     """
+    serializer_class = OverviewResponseSerializer
+    @extend_schema(
+        summary='Upload CSV and return descriptive statistics',
+        responses=OverviewResponseSerializer,
+        examples=[
+            OpenApiExample(
+                'Overview example',
+                value={'summary': 'A brief summary of the dataset', 'stats': {}, 'sample_chart': []},
+                request_only=False,
+                response_only=True,
+            )
+        ]
+    )
     def post(self, request):
         file = request.FILES.get('file')
         if not file:
@@ -141,71 +163,78 @@ class OverviewAPIView(APIView):
                 "stats": stats,
                 "sample_chart": sample_chart
             }, status=status.HTTP_200_OK)
-
+    
+        
         except Exception as e:
             logger.error(f"Error processing Overview: {e}", exc_info=True)
             return Response({"error": f"Error processing file: {str(e)}. Ensure it is a valid CSV."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-@api_view(['POST'])
-@permission_classes([AllowAny])
-def password_reset_request(request):
+class PasswordResetRequestView(GenericAPIView):
     """Send a password reset email with a one-time token link."""
-    email = request.data.get('email')
-    if not email:
-        return Response({'error': 'email required'}, status=status.HTTP_400_BAD_REQUEST)
-    try:
-        user = User.objects.get(email=email)
-    except User.DoesNotExist:
-        # don't reveal whether user exists
+    permission_classes = [AllowAny]
+    serializer_class = PasswordResetRequestResponseSerializer
+
+    def post(self, request):
+        email = request.data.get('email')
+        if not email:
+            return Response({'error': 'email required'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            user = User.objects.get(email=email)
+        except User.DoesNotExist:
+            # don't reveal whether user exists
+            return Response({'ok': True}, status=status.HTTP_200_OK)
+        token_gen = PasswordResetTokenGenerator()
+        token = token_gen.make_token(user)
+        uid = urlsafe_base64_encode(force_bytes(user.pk))
+        reset_url = f"{request.scheme}://{request.get_host()}/reset-password?uid={uid}&token={token}"
+        # send a simple email (developers should override email backend in prod)
+        try:
+            send_mail(
+                subject='Password reset for jArvIs360',
+                message=f'Use the following link to reset your password: {reset_url}',
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[email],
+                fail_silently=False,
+            )
+        except Exception:
+            # don't fail on email send errors in dev
+            logger.exception('failed to send password reset email')
+        # In DEBUG include the reset URL in the response to simplify developer testing
+        if getattr(settings, 'DEBUG', False):
+            # include example response shape for schema
+            return Response({'ok': True, 'reset_url': reset_url}, status=status.HTTP_200_OK)
         return Response({'ok': True}, status=status.HTTP_200_OK)
-    token_gen = PasswordResetTokenGenerator()
-    token = token_gen.make_token(user)
-    uid = urlsafe_base64_encode(force_bytes(user.pk))
-    reset_url = f"{request.scheme}://{request.get_host()}/reset-password?uid={uid}&token={token}"
-    # send a simple email (developers should override email backend in prod)
-    try:
-        send_mail(
-            subject='Password reset for jArvIs360',
-            message=f'Use the following link to reset your password: {reset_url}',
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[email],
-            fail_silently=False,
-        )
-    except Exception:
-        # don't fail on email send errors in dev
-        logger.exception('failed to send password reset email')
-    # In DEBUG include the reset URL in the response to simplify developer testing
-    if getattr(settings, 'DEBUG', False):
-        return Response({'ok': True, 'reset_url': reset_url}, status=status.HTTP_200_OK)
-    return Response({'ok': True}, status=status.HTTP_200_OK)
 
-@api_view(['POST'])
-@permission_classes([AllowAny])
-def password_reset_confirm(request):
+class PasswordResetConfirmView(GenericAPIView):
     """Confirm a password reset using uid and token and set a new password."""
-    uidb64 = request.data.get('uid')
-    token = request.data.get('token')
-    new_password = request.data.get('new_password')
-    if not uidb64 or not token or not new_password:
-        return Response({'error': 'uid, token and new_password required'}, status=status.HTTP_400_BAD_REQUEST)
-    try:
-        uid = force_str(urlsafe_base64_decode(uidb64))
-        user = User.objects.get(pk=uid)
-    except Exception:
-        return Response({'error': 'invalid link'}, status=status.HTTP_400_BAD_REQUEST)
-    token_gen = PasswordResetTokenGenerator()
-    if not token_gen.check_token(user, token):
-        return Response({'error': 'invalid token'}, status=status.HTTP_400_BAD_REQUEST)
-    user.set_password(new_password)
-    user.save()
-    return Response({'ok': True}, status=status.HTTP_200_OK)
+    permission_classes = [AllowAny]
+    serializer_class = PasswordResetConfirmResponseSerializer
+
+    def post(self, request):
+        uidb64 = request.data.get('uid')
+        token = request.data.get('token')
+        new_password = request.data.get('new_password')
+        if not uidb64 or not token or not new_password:
+            return Response({'error': 'uid, token and new_password required'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            uid = force_str(urlsafe_base64_decode(uidb64))
+            user = User.objects.get(pk=uid)
+        except Exception:
+            return Response({'error': 'invalid link'}, status=status.HTTP_400_BAD_REQUEST)
+        token_gen = PasswordResetTokenGenerator()
+        if not token_gen.check_token(user, token):
+            return Response({'error': 'invalid token'}, status=status.HTTP_400_BAD_REQUEST)
+        user.set_password(new_password)
+        user.save()
+        return Response({'ok': True}, status=status.HTTP_200_OK)
 
 
-class SimulationAPIView(APIView):
+class SimulationAPIView(GenericAPIView):
     """
     Receives a file and returns a brief AI summary for the simulation section.
     This simulates an LLM call to provide context for the simulation parameters.
     """
+    serializer_class = SimulationResponseSerializer
     def post(self, request):
         file = request.FILES.get('file')
         if not file:
@@ -292,7 +321,7 @@ class UploadedCSVDetailAPIView(RetrieveAPIView):
         return UploadedCSV.objects.filter(uploaded_by=self.request.user)
 
 
-class UploadedCSVReimportAPIView(APIView):
+class UploadedCSVReimportAPIView(GenericAPIView):
     """Trigger a re-import for an existing UploadedCSV.
 
     Uses the same idempotent claiming logic as the post-save handler. If a
@@ -303,6 +332,9 @@ class UploadedCSVReimportAPIView(APIView):
     permission_classes = [IsAuthenticated]
     authentication_classes = [CookieTokenAuthentication]
 
+    serializer_class = UploadedCSVReimportResponseSerializer
+
+    @extend_schema(responses={200: UploadedCSVReimportResponseSerializer, 202: UploadedCSVReimportResponseSerializer, 400: UploadedCSVReimportResponseSerializer, 404: UploadedCSVReimportResponseSerializer})
     def post(self, request, pk):
         profile = getattr(request.user, 'profile', None)
         if not profile or not profile.org:
@@ -508,143 +540,157 @@ class PublicDashboardRetrieveAPIView(RetrieveAPIView):
         return Response(ser.data, status=status.HTTP_200_OK)
 
 
-@api_view(['POST'])
-@permission_classes([AllowAny])
-def register_user(request):
+class RegisterUserView(GenericAPIView):
     """Simple registration endpoint creating a user and optional org."""
-    username = request.data.get('username')
-    password = request.data.get('password')
-    email = request.data.get('email')
-    org_name = request.data.get('org_name')
-    if not username or not password:
-        return Response({'error': 'username and password required'}, status=status.HTTP_400_BAD_REQUEST)
-    if not email:
-        return Response({'error': 'email required'}, status=status.HTTP_400_BAD_REQUEST)
-    # Enforce org_name for tenant scoping in this system — if not provided, return helpful error.
-    if User.objects.filter(username=username).exists():
-        return Response({'error': 'username exists'}, status=status.HTTP_400_BAD_REQUEST)
-    if User.objects.filter(email=email).exists():
-        return Response({'error': 'email exists'}, status=status.HTTP_400_BAD_REQUEST)
-    user = User.objects.create_user(username=username, password=password, email=email)
-    if not org_name:
-        return Response({'error': 'org_name is required for registration'}, status=status.HTTP_400_BAD_REQUEST)
-    slug = slugify(org_name)[:100]
-    org, _ = Organization.objects.get_or_create(slug=slug, defaults={'name': org_name})
-    profile = getattr(user, 'profile', None)
-    if profile:
-        profile.org = org
-        profile.save()
-    token, _ = DRFToken.objects.get_or_create(user=user)
-    resp = Response({'token': token.key, 'username': user.username, 'email': user.email}, status=status.HTTP_201_CREATED)
-    # Optionally set cookie-based token for convenience (frontend may request cookie mode)
-    if request.data.get('set_cookie'):
-        resp.set_cookie(
-            'auth_token', token.key,
-            httponly=True,
-            samesite=COOKIE_SAMESITE,
-            secure=COOKIE_SECURE,
-            domain=COOKIE_DOMAIN,
-            path='/'
-        )
-    return resp
+    permission_classes = [AllowAny]
+    serializer_class = RegisterResponseSerializer
 
-
-@api_view(['POST'])
-@permission_classes([AllowAny])
-def login_cookie(request):
-    """Authenticate by username/password and set an HttpOnly cookie with the token."""
-    username = request.data.get('username')
-    password = request.data.get('password')
-    if not username or not password:
-        return Response({'error': 'username and password required'}, status=status.HTTP_400_BAD_REQUEST)
-    try:
-        user = User.objects.get(username=username)
-    except User.DoesNotExist:
-        return Response({'error': 'invalid credentials'}, status=status.HTTP_400_BAD_REQUEST)
-    if not user.check_password(password):
-        return Response({'error': 'invalid credentials'}, status=status.HTTP_400_BAD_REQUEST)
-    # Issue JWT refresh + access tokens and set them as HttpOnly cookies
-    refresh = RefreshToken.for_user(user)
-    access_token = str(refresh.access_token)
-    refresh_token = str(refresh)
-    resp = Response({'username': user.username}, status=status.HTTP_200_OK)
-    # Set cookies (HttpOnly)
-    # Access token short lived; include SameSite and path
-    resp.set_cookie('access_token', access_token, httponly=True, samesite=COOKIE_SAMESITE, secure=COOKIE_SECURE, domain=COOKIE_DOMAIN, path='/')
-    resp.set_cookie('refresh_token', refresh_token, httponly=True, samesite=COOKIE_SAMESITE, secure=COOKIE_SECURE, domain=COOKIE_DOMAIN, path='/')
-    # Also set legacy DRF token cookie for compatibility with CookieTokenAuthentication fallback
-    try:
-        drf_token, _ = DRFToken.objects.get_or_create(user=user)
-        resp.set_cookie('auth_token', drf_token.key, httponly=True, samesite=COOKIE_SAMESITE, secure=COOKIE_SECURE, domain=COOKIE_DOMAIN, path='/')
-    except Exception:
-        # If token creation fails, continue without it
-        logger.exception('failed to set drf auth_token cookie')
-    return resp
-
-
-@api_view(['POST'])
-def logout_cookie(request):
-    # Remove cookie
-    resp = Response({'ok': True}, status=status.HTTP_200_OK)
-    resp.delete_cookie('auth_token')
-    return resp
-
-
-@api_view(['GET'])
-def me(request):
-    # Allow cookie-based auth by attempting CookieTokenAuthentication
-    auth_res = CookieTokenAuthentication().authenticate(request)
-    if not auth_res:
-        return Response({'user': None}, status=status.HTTP_200_OK)
-    user, token = auth_res
-    return Response({'user': {'username': user.username}}, status=status.HTTP_200_OK)
-
-
-@api_view(['POST'])
-@permission_classes([AllowAny])
-def jwt_refresh_cookie(request):
-    """Attempt to rotate refresh token from cookie and issue a new access token cookie."""
-    refresh_token = request.COOKIES.get('refresh_token')
-    if not refresh_token:
-        return Response({'error': 'no refresh token'}, status=status.HTTP_400_BAD_REQUEST)
-    try:
-        refresh = RefreshToken(refresh_token)
-        # rotate if configured
-        new_refresh = refresh.rotate() if hasattr(refresh, 'rotate') else refresh
-        access = str(new_refresh.access_token if hasattr(new_refresh, 'access_token') else refresh.access_token)
-        resp = Response({'ok': True}, status=status.HTTP_200_OK)
-        resp.set_cookie('access_token', access, httponly=True, samesite=COOKIE_SAMESITE, secure=COOKIE_SECURE, domain=COOKIE_DOMAIN, path='/')
-        # if rotation produced a new refresh token string, set it
-        try:
-            resp.set_cookie('refresh_token', str(new_refresh), httponly=True, samesite=COOKIE_SAMESITE, secure=COOKIE_SECURE, domain=COOKIE_DOMAIN, path='/')
-        except Exception:
-            # fallback: keep existing refresh cookie
-            pass
+    def post(self, request):
+        username = request.data.get('username')
+        password = request.data.get('password')
+        email = request.data.get('email')
+        org_name = request.data.get('org_name')
+        if not username or not password:
+            return Response({'error': 'username and password required'}, status=status.HTTP_400_BAD_REQUEST)
+        if not email:
+            return Response({'error': 'email required'}, status=status.HTTP_400_BAD_REQUEST)
+        # Enforce org_name for tenant scoping in this system — if not provided, return helpful error.
+        if User.objects.filter(username=username).exists():
+            return Response({'error': 'username exists'}, status=status.HTTP_400_BAD_REQUEST)
+        if User.objects.filter(email=email).exists():
+            return Response({'error': 'email exists'}, status=status.HTTP_400_BAD_REQUEST)
+        user = User.objects.create_user(username=username, password=password, email=email)
+        if not org_name:
+            return Response({'error': 'org_name is required for registration'}, status=status.HTTP_400_BAD_REQUEST)
+        slug = slugify(org_name)[:100]
+        org, _ = Organization.objects.get_or_create(slug=slug, defaults={'name': org_name})
+        profile = getattr(user, 'profile', None)
+        if profile:
+            profile.org = org
+            profile.save()
+        token, _ = DRFToken.objects.get_or_create(user=user)
+        resp = Response({'token': token.key, 'username': user.username, 'email': user.email}, status=status.HTTP_201_CREATED)
+        # Optionally set cookie-based token for convenience (frontend may request cookie mode)
+        if request.data.get('set_cookie'):
+            resp.set_cookie(
+                'auth_token', token.key,
+                httponly=True,
+                samesite=COOKIE_SAMESITE,
+                secure=COOKIE_SECURE,
+                domain=COOKIE_DOMAIN,
+                path='/'
+            )
         return resp
-    except Exception as e:
-        logger.exception('refresh failed')
-        return Response({'error': 'invalid refresh'}, status=status.HTTP_400_BAD_REQUEST)
 
 
-@api_view(['POST'])
-def jwt_logout(request):
-    # Attempt to blacklist the refresh token server-side if present
-    refresh_token = request.COOKIES.get('refresh_token')
-    if refresh_token:
+class LoginCookieView(GenericAPIView):
+    """Authenticate by username/password and set an HttpOnly cookie with the token."""
+    permission_classes = [AllowAny]
+    serializer_class = LoginResponseSerializer
+
+    def post(self, request):
+        username = request.data.get('username')
+        password = request.data.get('password')
+        if not username or not password:
+            return Response({'error': 'username and password required'}, status=status.HTTP_400_BAD_REQUEST)
         try:
-            token = RefreshToken(refresh_token)
-            # Blacklist the token (simplejwt provides a blacklist app)
-            token.blacklist()
+            user = User.objects.get(username=username)
+        except User.DoesNotExist:
+            return Response({'error': 'invalid credentials'}, status=status.HTTP_400_BAD_REQUEST)
+        if not user.check_password(password):
+            return Response({'error': 'invalid credentials'}, status=status.HTTP_400_BAD_REQUEST)
+        # Issue JWT refresh + access tokens and set them as HttpOnly cookies
+        refresh = RefreshToken.for_user(user)
+        access_token = str(refresh.access_token)
+        refresh_token = str(refresh)
+        resp = Response({'username': user.username}, status=status.HTTP_200_OK)
+        # Set cookies (HttpOnly)
+        # Access token short lived; include SameSite and path
+        resp.set_cookie('access_token', access_token, httponly=True, samesite=COOKIE_SAMESITE, secure=COOKIE_SECURE, domain=COOKIE_DOMAIN, path='/')
+        resp.set_cookie('refresh_token', refresh_token, httponly=True, samesite=COOKIE_SAMESITE, secure=COOKIE_SECURE, domain=COOKIE_DOMAIN, path='/')
+        # Also set legacy DRF token cookie for compatibility with CookieTokenAuthentication fallback
+        try:
+            drf_token, _ = DRFToken.objects.get_or_create(user=user)
+            resp.set_cookie('auth_token', drf_token.key, httponly=True, samesite=COOKIE_SAMESITE, secure=COOKIE_SECURE, domain=COOKIE_DOMAIN, path='/')
         except Exception:
-            # If blacklist fails, continue to clear cookies anyway
-            logger.exception('failed to blacklist refresh token')
-    resp = Response({'ok': True}, status=status.HTTP_200_OK)
-    resp.delete_cookie('access_token')
-    resp.delete_cookie('refresh_token')
-    return resp
+            # If token creation fails, continue without it
+            logger.exception('failed to set drf auth_token cookie')
+        return resp
 
 
-class ARRSummaryAPIView(APIView):
+class LogoutCookieView(GenericAPIView):
+    serializer_class = SimpleOkSerializer
+
+    def post(self, request):
+        # Remove cookie
+        resp = Response({'ok': True}, status=status.HTTP_200_OK)
+        resp.delete_cookie('auth_token')
+        return resp
+
+
+class MeView(GenericAPIView):
+    serializer_class = MeResponseSerializer
+
+    def get(self, request):
+        # Allow cookie-based auth by attempting CookieTokenAuthentication
+        auth_res = CookieTokenAuthentication().authenticate(request)
+        if not auth_res:
+            return Response({'user': None}, status=status.HTTP_200_OK)
+        user, token = auth_res
+        return Response({'user': {'username': user.username}}, status=status.HTTP_200_OK)
+
+
+class JwtRefreshCookieView(GenericAPIView):
+    """Attempt to rotate refresh token from cookie and issue a new access token cookie."""
+    permission_classes = [AllowAny]
+    serializer_class = SimpleOkSerializer
+
+    def post(self, request):
+        refresh_token = request.COOKIES.get('refresh_token')
+        if not refresh_token:
+            return Response({'error': 'no refresh token'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            refresh = RefreshToken(refresh_token)
+            # rotate if configured
+            new_refresh = refresh.rotate() if hasattr(refresh, 'rotate') else refresh
+            access = str(new_refresh.access_token if hasattr(new_refresh, 'access_token') else refresh.access_token)
+            resp = Response({'ok': True}, status=status.HTTP_200_OK)
+            resp.set_cookie('access_token', access, httponly=True, samesite=COOKIE_SAMESITE, secure=COOKIE_SECURE, domain=COOKIE_DOMAIN, path='/')
+            # if rotation produced a new refresh token string, set it
+            try:
+                resp.set_cookie('refresh_token', str(new_refresh), httponly=True, samesite=COOKIE_SAMESITE, secure=COOKIE_SECURE, domain=COOKIE_DOMAIN, path='/')
+            except Exception:
+                # fallback: keep existing refresh cookie
+                pass
+            return resp
+        except Exception as e:
+            logger.exception('refresh failed')
+            return Response({'error': 'invalid refresh'}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class JwtLogoutView(GenericAPIView):
+    permission_classes = []
+    authentication_classes = []
+    serializer_class = SimpleOkSerializer
+
+    def post(self, request):
+        # Attempt to blacklist the refresh token server-side if present
+        refresh_token = request.COOKIES.get('refresh_token')
+        if refresh_token:
+            try:
+                token = RefreshToken(refresh_token)
+                # Blacklist the token (simplejwt provides a blacklist app)
+                token.blacklist()
+            except Exception:
+                # If blacklist fails, continue to clear cookies anyway
+                logger.exception('failed to blacklist refresh token')
+        resp = Response({'ok': True}, status=status.HTTP_200_OK)
+        resp.delete_cookie('access_token')
+        resp.delete_cookie('refresh_token')
+        return resp
+
+
+class ARRSummaryAPIView(GenericAPIView):
     """Minimal ARR summary endpoint used by the frontend dashboard.
 
     This implementation is intentionally small: it demonstrates how to call the
@@ -654,9 +700,25 @@ class ARRSummaryAPIView(APIView):
     """
     permission_classes = [IsAuthenticated]
     authentication_classes = [CookieTokenAuthentication]
+    serializer_class = InsightsSerializer
 
+    @extend_schema(
+        responses=InsightsSerializer,
+        examples=[
+            OpenApiExample(
+                'Example ARRs',
+                value={
+                    'arr_kpis': {'MRR': 150.0, 'ARR': 1800.0},
+                    'top_customers': [{'customer_id': 'c1', 'mrr': 100.0}],
+                    'cohorts': {'2020-01': [10, 9, 8]},
+                    'retention_matrix': {'2020-01': {'2020-01': [1, 2, 3]}}
+                },
+                request_only=False,
+                response_only=True,
+            )
+        ],
+    )
     def get(self, request):
-        # For now, gather signup_date and a synthetic "active_months" if available
         # UploadedCSV may represent uploads; we treat each UploadedCSV as one customer for demo
         qs = UploadedCSV.objects.none()
         profile = getattr(request.user, 'profile', None)
@@ -676,18 +738,29 @@ class ARRSummaryAPIView(APIView):
         cohorts = cohortize([d for d, _ in signups if d])
         matrix = retention_matrix(signups)
 
-        # Prefer canonical normalized subscriptions when present
+        # Prefer canonical normalized subscriptions when present. Use the
+        # centralized insights service which encapsulates DB access and
+        # ARR/MRR computations. The service will gracefully return zeros if
+        # no subscriptions exist or an error occurs.
         try:
-            from .models import Subscription
-            subs_qs = Subscription.objects.none()
+            from .services.insights import compute_org_kpis
+            # Optional query param: since=YYYY-MM-DD to filter subscriptions
+            since_param = request.GET.get('since')
+            since = None
+            if since_param:
+                try:
+                    from datetime import datetime
+                    since = datetime.strptime(since_param, '%Y-%m-%d').date()
+                except Exception:
+                    # ignore parse errors and treat as no filter
+                    since = None
             if profile and profile.org:
-                subs_qs = Subscription.objects.filter(customer__org=profile.org)
-            # Build records from subscription rows
-            records = []
-            for s in subs_qs:
-                records.append({'customer_id': s.customer.external_id or s.customer.name or str(s.customer.pk), 'mrr': float(s.mrr), 'signup_date': s.start_date})
-            kpis = compute_mrr_and_arr(records) if records else {'MRR': 0.0, 'ARR': 0.0}
-            tops = top_customers_by_mrr(records, limit=10) if records else []
+                svc = compute_org_kpis(profile.org, since=since)
+                kpis = svc.get('kpis', {'MRR': 0.0, 'ARR': 0.0})
+                tops = svc.get('top_customers', [])
+            else:
+                kpis = {'MRR': 0.0, 'ARR': 0.0}
+                tops = []
         except Exception:
             # Fallback to parsing uploads (legacy behavior)
             from analysis.normalize import normalize_csv_text
@@ -754,11 +827,29 @@ class AutomationDetailAPIView(RetrieveUpdateDestroyAPIView):
         return Automation.objects.none()
 
 
-class AutomationRunAPIView(APIView):
+class AutomationRunAPIView(GenericAPIView):
     """Trigger an automation run (enqueues a Celery task)."""
     permission_classes = [IsAuthenticated]
     authentication_classes = [CookieTokenAuthentication]
+    # The API may return either an enqueued response (202) or an executed result (200).
+    # Use the enqueued serializer as the primary schema hint; the executed response is
+    # still documented in the @extend_schema examples above.
+    serializer_class = AutomationEnqueuedSerializer
 
+    @extend_schema(
+        summary='Trigger an automation run (enqueue or run sync fallback)',
+        responses={
+            202: AutomationEnqueuedSerializer,
+            200: AutomationExecutedSerializer,
+            403: None,
+            404: None,
+            500: None,
+        },
+        examples=[
+            OpenApiExample('Enqueued', value={'ok': True, 'message': 'enqueued'}, request_only=False, response_only=True),
+            OpenApiExample('Executed inline', value={'ok': True, 'result': {'ok': True}}, request_only=False, response_only=True),
+        ]
+    )
     def post(self, request, pk):
         profile = getattr(request.user, 'profile', None)
         if not profile or not profile.org:
@@ -766,17 +857,46 @@ class AutomationRunAPIView(APIView):
         auto = Automation.objects.filter(pk=pk, org=profile.org).first()
         if not auto:
             return Response({'error': 'automation not found'}, status=status.HTTP_404_NOT_FOUND)
-        # Enqueue Celery task if available
-        try:
-            from .tasks import automation_execute_task
-        except Exception:
-            automation_execute_task = None
+        # Resolve the task object in a way that supports both test patching styles:
+        # - prefer tests that patch `api.views.automation_execute_task` (module-level)
+        # - if module-level symbol is not present, fall back to `api.tasks.automation_execute_task`
+        # Prefer the attribute on the already-imported tasks module if present in sys.modules
+        # This allows tests that patch 'api.tasks.automation_execute_task' to be respected
+        # without forcing an import that could initialize Celery/kombu (which may fail
+        # in lightweight test environments).
+        import sys
+        tasks_mod_name = f"{__package__}.tasks"
+        task_from_tasks = None
+        if tasks_mod_name in sys.modules:
+            tasks_module = sys.modules[tasks_mod_name]
+            task_from_tasks = getattr(tasks_module, 'automation_execute_task', None)
 
-        if automation_execute_task is not None and hasattr(automation_execute_task, 'delay'):
+        # If the module-level symbol has been patched (tests patching api.views),
+        # prefer it. If it's not present or identical to the tasks module attr,
+        # prefer the tasks module attr when available (tests patching api.tasks).
+        if automation_execute_task is not None and automation_execute_task is not task_from_tasks:
+            task_obj = automation_execute_task
+        elif task_from_tasks is not None:
+            task_obj = task_from_tasks
+        else:
+            task_obj = automation_execute_task
+
+        # As a last resort, attempt to import the tasks module only when there is no
+        # resolved symbol and the tasks module hasn't been imported yet; avoid importing
+        # unnecessarily to prevent initializing Celery/kombu in test environments.
+        if task_obj is None and tasks_mod_name not in sys.modules:
             try:
-                automation_execute_task.delay(auto.pk, triggered_by=request.user.pk)
+                import importlib
+                tasks_module = importlib.import_module(tasks_mod_name)
+                task_obj = getattr(tasks_module, 'automation_execute_task', None)
+            except Exception:
+                task_obj = None
+
+        if task_obj is not None and hasattr(task_obj, 'delay'):
+            try:
+                task_obj.delay(auto.pk, triggered_by=request.user.pk)
                 return Response({'ok': True, 'message': 'enqueued'}, status=status.HTTP_202_ACCEPTED)
-            except Exception as e:
+            except Exception:
                 logger.exception('failed to enqueue automation')
 
         # Fallback: run synchronously (best-effort)
@@ -787,3 +907,6 @@ class AutomationRunAPIView(APIView):
         except Exception as e:
             logger.exception('failed to run automation sync')
             return Response({'error': 'failed to run automation'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+    
